@@ -1,0 +1,4395 @@
+*program zperson_edit.
+*&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+* Purpose:
+* ~~~~~~~~
+* This report implements an ALV Grid Control with an application
+* specific F4 help. The following aspects are dealth with:
+*  o how to replace the standard f4 help
+*     NOTE: This example uses a second ALV Grid Control to
+*           provide an application specific F4 help.
+*           This is probalbly NOT the usual way to
+*           provide such a functionality.
+*           However, the purpose of this report is not to
+*           show you how to implement an F4 help, but to
+*           explain how you pass the selected value to ALV,
+*           how you take values of other cells into account, etc.
+*           For this purpose, it does not matter how the f4 help
+*           is actually implemented.
+*
+*  o how to pass the selected value to the ALV Grid Control
+*  o how to build an f4 help, whose value range depend on
+*    a value of another cell.
+*-----------------------------------------------------------------
+* To check program behavior
+* ~~~~~~~~~~~~~~~~~~~~~~~~~
+* We use table SBOOK with columns CLASS and SMOKER ready for input.
+* The idea of this scenario is that it is only allowed to smoke
+* in the first class (value 'F' of field CLASS).
+* The application specific f4 help can be called for column CLASS:
+* o if the value of column SMOKER in the same row is 'X', only class
+*   'F' can be chosen
+* o if the value of column SMOKER in the same row is ' ', all
+*   classes are allowed ('F','C','Y'). Thus, the f4 help shows all
+*   values.
+* o if the value of column SMOKER in the same row is not valid
+*   (syntactically or semantically), a message is shown and
+*   no f4 help pops up.
+*-----------------------------------------------------------------
+* Essential steps (search for '§')
+* ~~~~~~~~~~~~~~~
+* Note that this report is rather long because the columns CLASS and
+* SMOKER are checked semantically which does not belong to the f4 help
+* implementation. Class lcl_application_dc handles semantic checks.
+* Local class lcl_application_f4 handles event ONF4 to build up
+* the f4 help, to pass the value to the ALV Grid Control and
+* to check whether the value of the SMOKER column is valid.
+*
+* 1. Register event ONF4 at frontend using method
+*    register_f4_for_fields. For this purpose, you pass a table
+*    with all fields, for which you want to implement your own
+*    f4 help.
+*   1b. If the value range in your f4 help depends on other
+*       values of cells that are input enabled, set the
+*       GETBEFORE parameter.
+* 2. Implement an event handler method for event ONF4.
+* 3. Call your own f4 help. To customize your popup check
+*    first if the cell is ready for input (event parameter E_DISPLAY).
+* 4. Check whether the value your f4 help depends on is valid.
+* 5. If not already caught by your own f4 help, check whether
+*    the triggered cell was ready for input by using E_DISPLAY
+*    and if not, exit.
+* 6. After the user selected a value, pass it to the ALV Grid Control:
+*   6a. Define a field symbol of type: LVC_T_MODI and a structure of
+*       type LVC_S_MODI to pass the value later on.
+*   6b. Dereference attribute M_DATA to your field symbol and add
+*       the selected value to the table to which this symbol points to.
+* 7. Inform the ALV Grid Control that an own f4 help has been processed
+*    to suppress the standard f4 help.
+*-----------------------------------------------------------------------
+*&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+CLASS lcl_application_f4 DEFINITION DEFERRED.
+CLASS lcl_application_dc DEFINITION DEFERRED.
+*CLASS lcl_events_d0100 DEFINITION DEFERRED.
+
+DATA: ok_code            LIKE sy-ucomm,
+      save_ok            LIKE sy-ucomm,
+      g_container        TYPE scrfname VALUE 'CC1',
+      gr_grid_d0100      TYPE REF TO cl_gui_alv_grid,
+      g_custom_container TYPE REF TO cl_gui_custom_container,
+*      gr_events_d0100    TYPE REF TO lcl_events_d0100,
+      gt_fieldcat        TYPE lvc_t_fcat,
+      g_max              TYPE i VALUE 100.
+
+
+
+
+DATA: g_onf4 TYPE REF TO lcl_application_f4,
+      g_dc   TYPE REF TO lcl_application_dc.
+
+
+DATA: gt_outtab TYPE TABLE OF sbook.
+
+****************************************************************
+* LOCAL CLASSES: Definition
+****************************************************************
+*===============================================================
+* class lcl_application_f4: local class to handle own F4.
+*
+* Definition:
+* ~~~~~~~~~~~
+CLASS lcl_application_f4 DEFINITION.
+
+  PUBLIC SECTION.
+    METHODS:
+
+      on_f4 FOR EVENT onf4 OF cl_gui_alv_grid
+        IMPORTING sender
+                  e_fieldname
+                  es_row_no
+                  er_event_data
+                  et_bad_cells
+                  e_display.
+
+    METHODS: reset.
+    METHODS: show_f4.
+
+  PRIVATE SECTION.
+**
+* attributes for creating an own F4-Help
+* (using a second ALV Grid Control
+**
+    DATA: f4_alv  TYPE REF TO cl_gui_alv_grid,
+          f4_cont TYPE REF TO cl_gui_custom_container.
+
+    TYPES: BEGIN OF f4_itab_type.
+    TYPES: value TYPE s_class.
+    TYPES: descr(20) TYPE c.
+    TYPES: END OF f4_itab_type.
+
+    DATA: f4_itab TYPE TABLE OF f4_itab_type.
+    DATA: fieldcatalog TYPE lvc_t_fcat.
+
+**
+* attributes to store event parameters
+* (after the CALL SCREEN command, the event parameters
+* are not accessible)
+**
+    TYPES: BEGIN OF onf4_event_parameters_type.
+    TYPES: c_fieldname     TYPE lvc_fname.
+    TYPES: cs_row_no       TYPE lvc_s_roid.
+    TYPES: cr_event_data   TYPE REF TO cl_alv_event_data.
+    TYPES: ct_bad_cells    TYPE lvc_t_modi.
+    TYPES: c_display       TYPE char01.
+    TYPES: END OF onf4_event_parameters_type.
+    TYPES: ddshretval_table TYPE TABLE OF ddshretval.
+    DATA: f4_params TYPE onf4_event_parameters_type.
+
+
+**
+* Methods to create own F4-Help
+* (This is done using a second ALV Grid Control)
+**
+    METHODS: init_f4.
+
+    METHODS: build_fieldcatalog.
+    METHODS: fill_f4_itab IMPORTING smoker TYPE c.
+
+    METHODS: on_double_click FOR EVENT double_click OF cl_gui_alv_grid
+      IMPORTING es_row_no.
+
+**
+* Methods to check whether the values which the F4-Help needs
+* are correct
+* (The entries of the F4-Help of field CLASS depend on the value
+* of field SMOKER. If field SMOKER of the same row is syntaktically
+* or semantically not correct, this has to be handled during ONF4.
+**
+    METHODS: smoker_cell_is_bad
+      RETURNING VALUE(r_flag) TYPE i.
+
+    METHODS: my_f4
+      IMPORTING sender        TYPE REF TO cl_gui_alv_grid
+                et_bad_cells  TYPE lvc_t_modi
+                es_row_no     TYPE lvc_s_roid
+                er_event_data TYPE REF TO cl_alv_event_data
+                e_display     TYPE c
+                e_fieldname   TYPE lvc_fname
+      EXPORTING lt_f4         TYPE ddshretval_table.
+
+
+
+ENDCLASS.                    "lcl_application_f4 DEFINITION
+*
+* lcl_application_f4 (Definition)
+*===============================================================
+* class lcl_application_dc: local class to handle event data_changed.
+*
+* Definition:
+* ~~~~~~~~~~~
+CLASS lcl_application_dc DEFINITION.
+
+  PUBLIC SECTION.
+
+    METHODS: handle_data_changed
+                FOR EVENT data_changed OF cl_gui_alv_grid
+      IMPORTING er_data_changed
+                e_onf4 e_onf4_before e_onf4_after.
+
+  PRIVATE SECTION.
+
+* This flag is set if any error occured in one of the
+* following methods:
+    DATA: error_in_data TYPE c.
+
+    METHODS:
+      perform_semantic_checks
+        IMPORTING
+          pr_data_changed TYPE REF TO cl_alv_changed_data_protocol.
+
+    METHODS:
+      read_sap_data
+        IMPORTING
+          pr_data_changed TYPE REF TO cl_alv_changed_data_protocol.
+
+    METHODS:
+      read_intf_data
+        IMPORTING
+          pr_data_changed TYPE REF TO cl_alv_changed_data_protocol.
+
+    METHODS: check_perid
+      IMPORTING
+        ps_good_perid   TYPE lvc_s_modi
+        pr_data_changed TYPE REF TO cl_alv_changed_data_protocol.
+
+    METHODS: check_cacid
+      IMPORTING
+        ps_good_cacid   TYPE lvc_s_modi
+        pr_data_changed TYPE REF TO cl_alv_changed_data_protocol.
+
+    METHODS: check_auid
+      IMPORTING
+        ps_good_auid    TYPE lvc_s_modi
+        pr_data_changed TYPE REF TO cl_alv_changed_data_protocol.
+
+    METHODS: check_email
+      IMPORTING
+        ps_good_email   TYPE lvc_s_modi
+        pr_data_changed TYPE REF TO cl_alv_changed_data_protocol.
+
+*    METHODS: check_class
+*      IMPORTING
+*        ps_good_class   TYPE lvc_s_modi
+*        pr_data_changed TYPE REF TO cl_alv_changed_data_protocol.
+
+ENDCLASS.                    "lcl_application_dc DEFINITION
+*
+* lcl_application_dc (Definition)
+*===============================================================
+*CLASS lcl_events_d0100 DEFINITION.
+*  PUBLIC SECTION.
+*    METHODS:
+**    user_command         for event user_command
+**                         of cl_gui_alv_grid
+**                         importing e_ucomm sender,
+**
+**    before_user_command  for event before_user_command
+**                         of cl_gui_alv_grid
+**                         importing e_ucomm,
+**
+**    after_user_command   for event after_user_command
+**                         of cl_gui_alv_grid
+**                         importing e_ucomm
+**                                   e_not_processed
+**                                   e_saved,
+**
+**    double_click         for event double_click
+**                         of cl_gui_alv_grid
+**                         importing e_row
+**                                   e_column
+**                                   es_row_no,
+**
+**    hotspot_click        for event hotspot_click
+**                         of cl_gui_alv_grid
+**                         importing e_row_id
+**                                   e_column_id
+**                                   es_row_no,
+**
+**    menu_button          for event menu_button
+**                         of cl_gui_alv_grid
+**                         importing e_object
+**                                   e_ucomm,
+**
+**    toolbar              for event toolbar
+**                         of cl_gui_alv_grid
+**                         importing e_object
+**                                   e_interactive,
+**
+**    context_menu_request for event context_menu_request
+**                         of cl_gui_alv_grid
+**                         importing e_object,
+**
+**    top_of_page          for event top_of_page
+**                         of cl_gui_alv_grid
+**                         importing e_dyndoc_id,
+**
+**    end_of_list          for event end_of_list
+**                         of cl_gui_alv_grid
+**                         importing e_dyndoc_id,
+**
+**    print_top_of_page    for event print_top_of_page
+**                         of cl_gui_alv_grid,
+**
+**    print_end_of_page    for event print_end_of_page
+**                         of cl_gui_alv_grid,
+**
+**    print_top_of_list    for event print_top_of_list
+**                         of cl_gui_alv_grid,
+**
+**    print_end_of_list    for event print_end_of_list
+**                         of cl_gui_alv_grid,
+**
+*      after_refresh        FOR EVENT after_refresh
+*        OF cl_gui_alv_grid,
+*
+**    delayed_callback     for event delayed_callback
+**                         of cl_gui_alv_grid,
+**
+**    delayed_changed_sel_callback
+**                         for event delayed_changed_sel_callback
+**                         of cl_gui_alv_grid,
+**
+**    subtotal_text        for event subtotal_text
+**                         of cl_gui_alv_grid
+**                         importing es_subtottxt_info
+**                                   ep_subtot_line
+**                                   e_event_data,
+**
+**    ondrag               for event ondrag
+**                         of cl_gui_alv_grid
+**                         importing e_row
+**                                   e_column
+**                                   es_row_no
+**                                   e_dragdropobj,
+**
+**    ondrop               for event ondrop
+**                         of cl_gui_alv_grid
+**                         importing e_row
+**                                   e_column
+**                                   es_row_no
+**                                   e_dragdropobj,
+**
+**    ondropcomplete       for event ondropcomplete
+**                         of cl_gui_alv_grid
+**                         importing e_row
+**                                   e_column
+**                                   es_row_no
+**                                   e_dragdropobj,
+**
+**    ondropgetflavor      for event ondropgetflavor
+**                         of cl_gui_alv_grid
+**                         importing e_row
+**                                   e_column
+**                                   es_row_no
+**                                   e_dragdropobj
+**                                   e_flavors,
+**
+*      data_changed         FOR EVENT data_changed
+*                  OF cl_gui_alv_grid
+*        IMPORTING er_data_changed
+*                  e_onf4
+*                  e_onf4_before
+*                  e_onf4_after.
+**
+**    data_changed_finished
+**                         for event data_changed_finished
+**                         of cl_gui_alv_grid,
+**
+**    button_click         for event button_click
+**                         of cl_gui_alv_grid
+**                         importing es_col_id
+**                                   es_row_no,
+**
+**    onf1                 for event onf1
+**                         of cl_gui_alv_grid
+**                         importing e_fieldname
+**                                   es_row_no
+**                                   er_event_data,
+**
+**    onf4                 for event onf4
+**                         of cl_gui_alv_grid
+**                         importing e_fieldname
+**                                   e_fieldvalue
+**                                   es_row_no
+**                                   er_event_data
+**                                   et_bad_cells
+**                                   e_display.
+*
+*ENDCLASS.                    "lcl_events_d0100 DEFINITION
+
+
+
+****************************************************************
+* LOCAL CLASSES: Implementation
+****************************************************************
+*===============================================================
+* class lcl_application_f4 (Implementation)
+*
+CLASS lcl_application_f4 IMPLEMENTATION.
+
+*§2. Implement an event handler method for event ONF4.
+
+  METHOD on_f4.
+    DATA: ls_f4 TYPE ddshretval,
+          lt_f4 TYPE TABLE OF ddshretval.
+
+** Save event parameter as global attributes of this class
+** (maybe solved differently if you use a function module!)
+*    f4_params-c_fieldname = e_fieldname.
+*    f4_params-cs_row_no = es_row_no.
+*    f4_params-cr_event_data = er_event_data.
+*    f4_params-ct_bad_cells = et_bad_cells.
+*    f4_params-c_display = e_display.
+
+    CASE e_fieldname.
+      WHEN 'ANSVH'.
+
+**§5 define fields and field-symbols for data-update
+*      field-symbols: <itab> type lvc_t_modi.
+*      data: ls_modi type lvc_s_modi.
+*
+** now I call my personal f4-help
+*      call method my_f4
+*        exporting
+*          sender        = sender
+*          es_row_no     = es_row_no
+*          er_event_data = er_event_data
+*          et_bad_cells  = et_bad_cells
+*          e_display     = e_display
+*          e_fieldname   = e_fieldname
+*        importing
+*          lt_f4         = lt_f4.
+*
+**§6 assign the cell table fieldsymbol to the dereferenced data table and
+**   fill the table.
+*      assign er_event_data->m_data->* to <itab>.
+*
+*      read table lt_f4 into ls_f4 with key fieldname = 'ANSVH'.
+*      if not ls_f4 is initial.
+*        ls_modi-row_id    = es_row_no-row_id.
+*        ls_modi-fieldname = 'ANSVH'.
+*        ls_modi-value     = ls_f4-fieldval.
+*        append ls_modi to <itab>.
+*      endif.
+
+
+        PERFORM value_request_ansvh USING
+          es_row_no
+          er_event_data .
+
+      WHEN 'PLANS'.
+        DATA: ls_objec TYPE objec.
+        CALL FUNCTION 'RH_OBJID_REQUEST'
+          EXPORTING
+            plvar           = '01'
+            otype           = 'S'
+            dynpro_repid    = sy-repid
+            dynpro_dynnr    = '100'
+          IMPORTING
+            sel_object      = ls_objec
+          EXCEPTIONS
+            cancelled       = 1
+            wrong_condition = 2
+            nothing_found   = 3
+*           illegal_mode    = 4                "XMKAL0K093206
+            internal_error  = 5
+            OTHERS          = 6.
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                  WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+        IF ls_objec IS NOT INITIAL.
+
+          FIELD-SYMBOLS: <itab_plans> TYPE lvc_t_modi.
+          ASSIGN er_event_data->m_data->* TO <itab_plans>.
+          APPEND INITIAL LINE TO <itab_plans> ASSIGNING FIELD-SYMBOL(<ls_modi_plans>).
+          <ls_modi_plans>-row_id    = es_row_no-row_id.
+          <ls_modi_plans>-fieldname = 'PLANS'.
+          <ls_modi_plans>-value     = ls_objec-realo.
+        ENDIF.
+
+    ENDCASE.
+*§7. Inform the ALV Grid Control that an own f4 help has been processed
+*    to suppress the standard f4 help.
+
+    er_event_data->m_event_handled = 'X'.
+
+  ENDMETHOD.                                                  "on_f4
+*---------------------------------------------------------------------
+
+*---------------------------------------------------------------------*
+*       METHOD my_f4  insert here your own f4-help                    *
+*---------------------------------------------------------------------*
+*       ........                                                      *
+*---------------------------------------------------------------------*
+  METHOD my_f4.
+
+    DATA: wa_tab      LIKE LINE OF gt_alv_table,
+          lt_fcat     TYPE lvc_t_fcat,
+          ls_fieldcat TYPE lvc_s_fcat,
+          l_tabname   TYPE dd03v-tabname,
+          l_fieldname TYPE dd03v-fieldname,
+          l_help_valu TYPE help_info-fldvalue,
+          lt_bad_cell TYPE lvc_t_modi,
+          lp_wa       TYPE REF TO data.
+
+    FIELD-SYMBOLS: <l_field_value> TYPE any,
+                   <ls_wa>         TYPE any.
+
+    CALL METHOD sender->get_frontend_fieldcatalog
+      IMPORTING
+        et_fieldcatalog = lt_fcat.
+
+    READ TABLE gt_alv_table INDEX es_row_no-row_id INTO wa_tab.
+    CREATE DATA lp_wa LIKE LINE OF gt_alv_table.
+    ASSIGN lp_wa->* TO <ls_wa>.
+    <ls_wa> = wa_tab.
+
+    READ TABLE lt_fcat
+       WITH KEY fieldname = e_fieldname INTO ls_fieldcat.
+    MOVE ls_fieldcat-ref_table TO l_tabname.
+    MOVE ls_fieldcat-fieldname TO l_fieldname.
+    ASSIGN COMPONENT ls_fieldcat-fieldname
+                   OF STRUCTURE wa_tab
+                   TO <l_field_value>.
+
+    WRITE <l_field_value> TO l_help_valu.
+
+    PERFORM f4_set
+                 USING sender
+                       lt_fcat
+                       lt_bad_cell
+                       es_row_no-row_id
+                       <ls_wa>.
+
+    CALL FUNCTION 'F4IF_FIELD_VALUE_REQUEST'
+      EXPORTING
+        tabname          = l_tabname
+        fieldname        = l_fieldname
+        display          = e_display
+        callback_program = sy-repid
+        value            = l_help_valu
+        callback_form    = 'F4'
+      TABLES
+        return_tab       = lt_f4.
+
+  ENDMETHOD.                                                "my_f4
+*----------------------------------------------------------------------------
+  METHOD show_f4.
+    DATA: ls_outtab TYPE sbook.
+
+* initialize own f4 help if needed
+    IF f4_cont IS INITIAL.
+      CALL METHOD init_f4.
+    ENDIF.
+
+*§4. Check whether the value your f4 help depends on is valid.
+
+* The possible values of field CLASS depend on
+* the value of field SMOKER of the same row.
+* You have to check that this value is valid:
+    IF smoker_cell_is_bad( ) EQ 1.
+      LEAVE SCREEN.
+    ENDIF.
+
+* determine value of column SMOKER and use appropriate f4 table
+    READ TABLE gt_outtab INTO ls_outtab INDEX f4_params-cs_row_no-row_id
+.
+    CALL METHOD fill_f4_itab( ls_outtab-smoker ).
+
+* refresh list of values in f4 help and show it
+    CALL METHOD f4_alv->refresh_table_display.
+* CAUTION: Do not use method REFRESH_TABLE_DISPLAY for
+* your editable ALV Grid instances while handling events
+* DATA_CHANGED or ONf4. You would overwrite intermediate
+* values of your output table on frontend.
+* 'f4_alv' is a non-editable ALV Grid Control for the
+* application specific F4-Help. Therefore, calling
+* REFRESH_TABLE_DISPLAY for this instance has no
+* negative effect.
+
+    CALL METHOD cl_gui_cfw=>flush.
+  ENDMETHOD.                                                "show_f4
+
+*--------------------------------------------------------------------
+
+  METHOD init_f4.
+    DATA: ls_layout TYPE lvc_s_layo.
+* build fieldcatalog entries for f4
+    CALL METHOD build_fieldcatalog.
+
+* create controls
+    CREATE OBJECT f4_cont
+      EXPORTING
+        container_name = 'CC_ONF4'.
+
+    CREATE OBJECT f4_alv
+      EXPORTING
+        i_parent = f4_cont.
+
+* hide toolbar
+    ls_layout-no_toolbar = 'X'.
+
+    CALL METHOD f4_alv->set_table_for_first_display
+      EXPORTING
+        is_layout       = ls_layout
+      CHANGING
+        it_fieldcatalog = fieldcatalog
+        it_outtab       = f4_itab.
+
+* register event double click on backend
+    SET HANDLER me->on_double_click FOR f4_alv.
+
+* flush since 'ls_layout' is local!
+    CALL METHOD cl_gui_cfw=>flush.
+
+  ENDMETHOD.                                                "init_f4
+*-----------------------------------------------------
+  METHOD fill_f4_itab.
+    DATA ls_f4_itab TYPE f4_itab_type.
+
+* Delete all entries in f4_itab to determine
+* offered values dynamically
+    CLEAR f4_itab[].
+* create entries depending on SMOKER field
+    IF smoker IS INITIAL.
+      ls_f4_itab-value = 'C'.
+      ls_f4_itab-descr = TEXT-t03. "Business Class
+      APPEND ls_f4_itab TO f4_itab.
+      ls_f4_itab-value = 'Y'.
+      ls_f4_itab-descr = TEXT-t04. "Economie Class
+      APPEND ls_f4_itab TO f4_itab.
+      ls_f4_itab-value = 'F'.
+      ls_f4_itab-descr = TEXT-t05. "First Class
+      APPEND ls_f4_itab TO f4_itab.
+    ELSE.
+      ls_f4_itab-value = 'F'.
+      ls_f4_itab-descr = TEXT-t05. "First Class
+      APPEND ls_f4_itab TO f4_itab.
+    ENDIF.
+  ENDMETHOD.                    "fill_f4_itab
+*----------------------------------------------------
+  METHOD build_fieldcatalog.
+    DATA: ls_fcat TYPE lvc_s_fcat.
+
+    CLEAR ls_fcat.
+    ls_fcat-fieldname = 'VALUE'.
+    ls_fcat-coltext = TEXT-t02.
+    ls_fcat-inttype = 'S_CLASS'.
+    ls_fcat-outputlen = 5.
+    APPEND ls_fcat TO fieldcatalog.
+    CLEAR ls_fcat.
+    ls_fcat-fieldname = 'DESCR'.
+    ls_fcat-coltext = TEXT-t01.
+    ls_fcat-inttype = 'C'.
+    ls_fcat-outputlen = 20.
+    APPEND ls_fcat TO fieldcatalog.
+  ENDMETHOD.                    "build_fieldcatalog
+*-----------------------------------------------------
+  METHOD on_double_click.
+
+*§5. If not already caught by your own f4 help, check whether
+*    the triggered cell was ready for input by using E_DISPLAY
+*    and if not, exit.
+    IF f4_params-c_display EQ 'X'.
+      LEAVE SCREEN.
+    ENDIF.
+
+*§6. After the user selected a value, pass it to the ALV Grid Control:
+
+*§  6a. Define a field symbol of type: LVC_T_MODI and a structure of
+*       type LVC_S_MODI to pass the value later on.
+    FIELD-SYMBOLS <itab> TYPE lvc_t_modi.
+    DATA: ls_modi    TYPE lvc_s_modi,
+          ls_f4_itab TYPE f4_itab_type.
+
+*§  6b. Dereference attribute M_DATA into your field symbol and add
+*       the selected value to the table to which this symbol points to.
+    ASSIGN f4_params-cr_event_data->m_data->* TO <itab>.
+    ls_modi-row_id = f4_params-cs_row_no-row_id.
+    ls_modi-fieldname = f4_params-c_fieldname.
+
+    READ TABLE f4_itab INTO ls_f4_itab INDEX es_row_no-row_id.
+
+    ls_modi-value = ls_f4_itab-value.
+    APPEND ls_modi TO <itab>.
+
+    LEAVE SCREEN.
+  ENDMETHOD.                    "on_double_click
+*-----------------------------------------------------
+  METHOD reset.
+    FIELD-SYMBOLS <itab> TYPE lvc_t_modi.
+
+    ASSIGN f4_params-cr_event_data->m_data->* TO <itab>.
+    CLEAR <itab>[].
+  ENDMETHOD.                    "reset
+*-----------------------------------------------------
+  METHOD smoker_cell_is_bad.
+    DATA: ls_bad_cell TYPE lvc_s_modi.                      "#EC NEEDED
+
+    r_flag = 0. "no error initially
+
+* Determine if value of smoker cell of the same
+* row has a bad value. If so, a message pops up
+* instead of our F4 help.
+    READ TABLE f4_params-ct_bad_cells INTO ls_bad_cell
+        WITH KEY fieldname = 'SMOKER'
+                 row_id    = f4_params-cs_row_no-row_id.
+    IF sy-subrc EQ 0.
+      r_flag = 1.
+      MESSAGE i000(0k) WITH TEXT-i01 TEXT-i02.
+* NOTE: Although there is a bad value present
+*       the ALV Grid Control shows no error protocol.
+*       However, the bad value is saved in the
+*       protocol and event DATA_CHANGED_FINISHED is
+*       not raised.
+    ENDIF.
+
+  ENDMETHOD.                    "smoker_cell_is_bad
+*=====================================================
+
+
+ENDCLASS.                    "lcl_application_f4 IMPLEMENTATION
+
+*
+* lcl_application_f4 (Implementation)
+*===================================================================
+
+*===============================================================
+* class lcl_application_dc (Implementation)
+*
+CLASS lcl_application_dc IMPLEMENTATION.
+  METHOD handle_data_changed.
+*
+    error_in_data = space.
+
+
+    DATA: ls_good_cells  TYPE lvc_s_modi.
+
+    LOOP AT er_data_changed->mt_good_cells INTO ls_good_cells.
+      CASE ls_good_cells-fieldname.
+        WHEN 'ACTION'
+          OR 'PERID'
+          OR 'CACID'
+          OR 'AUID'
+          OR 'BEGDA'
+          OR 'PLANS'
+          OR 'ANSVH'
+          OR 'GBDAT'
+          OR 'EMAIL'.
+
+          CALL METHOD er_data_changed->modify_cell
+            EXPORTING
+              i_row_id    = ls_good_cells-row_id
+              i_tabix     = ls_good_cells-tabix
+              i_fieldname = ls_good_cells-fieldname
+              i_value     = ls_good_cells-value.
+        WHEN OTHERS.
+      ENDCASE.
+    ENDLOOP.
+
+
+
+* Distinguish, if DATA_CHANGED was raised because of an
+* own F4-help.
+* Event DATA_CHANGED provides parameter E_ONF4
+* for this purpose.
+    IF NOT e_onf4 IS INITIAL.
+* Add your special handling here if needed.
+* Event DATA_CHANGED provides parameters E_ONF4_AFTER
+* and E_ONF4_BEFORE to distinguish the context
+* additionally.
+
+* In general, semantic checks should be the same no matter if
+* they have been entered by hand or using an application
+* specific F4 help. So you probably do not need these parameters.
+    ELSE.
+      CALL METHOD perform_semantic_checks( er_data_changed ).
+    ENDIF.
+
+*    IF error_in_data = 'X'.
+*      CALL METHOD er_data_changed->display_protocol.
+*    ELSE.
+
+    IF error_in_data NE 'X'.
+
+      read_sap_data( er_data_changed ).
+      read_intf_data( er_data_changed ).
+
+    ENDIF.
+
+  ENDMETHOD.                    "handle_data_changed
+*------------------------------------
+* private methods
+*------------------------------------
+  METHOD read_sap_data.
+
+    CLEAR gs_db_data.
+
+********************
+*-- Read sap data
+********************
+    DATA(lo_student_master) = NEW zcl_au_studentmaster( ).
+    DATA: lv_intf_dodid TYPE zaudodid.
+    DATA: lv_does_not_exist TYPE char01.
+
+    DATA: lv_perid  TYPE prdni,
+          lv_auid   TYPE prdni,
+          lv_cacid  TYPE prdni,
+          lv_pernr  TYPE pernr_d,
+          lv_action TYPE c.
+
+    READ TABLE  pr_data_changed->mt_good_cells INTO DATA(ls_current_cell) INDEX 1.
+    CHECK sy-subrc = 0.
+    pr_data_changed->modify_cell(
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_tabix     = ls_current_cell-tabix
+        i_fieldname = 'LIGHT'
+        i_value     = '3' ).
+
+    pr_data_changed->modify_cell(
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_tabix     = ls_current_cell-tabix
+        i_fieldname = 'TYPE'
+        i_value     = '' ).
+
+    pr_data_changed->modify_cell(
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_tabix     = ls_current_cell-tabix
+        i_fieldname = 'MESSAGE'
+        i_value     = '' ).
+
+
+
+*--  Position validation and read short text
+    DATA: lv_begda TYPE begda, "Start date P0000-BEGDA  PA0000
+          lv_plans TYPE plans, "Position  PA0001
+          lv_short TYPE short_d. "Position Object Abbreviation HRP1000-SHORT
+
+    IF ls_current_cell-fieldname =  'PLANS'.
+
+      CALL METHOD pr_data_changed->get_cell_value
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_fieldname = 'PLANS'
+        IMPORTING
+          e_value     = lv_plans.
+      CALL METHOD pr_data_changed->get_cell_value
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_fieldname = 'BEGDA'
+        IMPORTING
+          e_value     = lv_begda.
+      IF lv_begda IS INITIAL.
+        lv_begda = sy-datum.
+      ENDIF.
+
+      SELECT SINGLE short FROM hrp1000 INTO @DATA(lv_hrp1000_short)
+        WHERE
+                plvar = '01'
+            AND otype = 'S'
+            AND ( begda LE @lv_begda
+              AND endda GE @lv_begda )
+          AND objid = @lv_plans.
+      IF sy-subrc EQ 0.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'SHORT'
+            i_value     = lv_hrp1000_short ).
+
+      ELSE.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).  "Red
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = 'Please enter valid Position ID or Abbr' ).
+
+      ENDIF.
+    ENDIF.
+    IF ls_current_cell-fieldname =  'SHORT'.
+
+      CALL METHOD pr_data_changed->get_cell_value
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_fieldname = 'SHORT'
+        IMPORTING
+          e_value     = lv_short.
+      CALL METHOD pr_data_changed->get_cell_value
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_fieldname = 'BEGDA'
+        IMPORTING
+          e_value     = lv_begda.
+
+      IF lv_begda IS INITIAL.
+        lv_begda = sy-datum.
+      ENDIF.
+      SELECT SINGLE objid FROM hrp1000 INTO @DATA(lv_hrp1000_objid)
+        WHERE
+                plvar = '01'
+            AND otype = 'S'
+            AND ( begda LE @lv_begda
+              AND endda GE @lv_begda )
+          AND short = @lv_short.
+      IF sy-subrc EQ 0.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'PLANS'
+            i_value     = lv_hrp1000_objid ).
+
+      ELSE.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).  "Red
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = 'Please enter valid Position ID or Abbr' ).
+
+      ENDIF.
+    ENDIF.
+
+
+
+
+
+
+    CHECK
+      ls_current_cell-fieldname =  'PERID'
+     OR ls_current_cell-fieldname =  'CACID'
+     OR  ls_current_cell-fieldname =  'AUID'
+     OR  ls_current_cell-fieldname =  'ACTION'. "When action type changed
+
+
+*-- check action = 2,3 or 4
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_fieldname = 'ACTION'
+      IMPORTING
+        e_value     = lv_action.
+
+******************************  Data should display for all action types
+*    CHECK lv_action = '2'
+*        OR lv_action = '3'
+*        OR lv_action = '4'.
+
+
+    IF ls_current_cell-fieldname = 'PERID'.
+      CALL METHOD pr_data_changed->get_cell_value
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_fieldname = ls_current_cell-fieldname
+        IMPORTING
+          e_value     = lv_perid.
+      SELECT SINGLE pernr INTO @lv_pernr
+        FROM pa0105
+        WHERE usrid = @lv_perid.
+
+    ENDIF.
+    IF lv_pernr IS INITIAL.
+      IF ls_current_cell-fieldname = 'AUID'.
+        CALL METHOD pr_data_changed->get_cell_value
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = ls_current_cell-fieldname
+          IMPORTING
+            e_value     = lv_auid.
+        SELECT SINGLE pernr INTO @lv_pernr
+            FROM pa0105
+            WHERE usrid = @lv_auid.
+      ENDIF.
+    ENDIF.
+    IF lv_pernr IS INITIAL.
+      IF ls_current_cell-fieldname = 'CACID'.
+        CALL METHOD pr_data_changed->get_cell_value
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = ls_current_cell-fieldname
+          IMPORTING
+            e_value     = lv_cacid.
+        SELECT SINGLE pernr INTO @lv_pernr
+            FROM pa0105
+            WHERE usrid = @lv_cacid.
+      ENDIF.
+    ENDIF.
+*    IF lv_action = 1.   "During action add  check  if   CACID/SSN/AUID entered
+*      CALL METHOD pr_data_changed->get_cell_value
+*        EXPORTING
+*          i_row_id    = ls_current_cell-row_id
+*          i_fieldname = 'CACID'
+*        IMPORTING
+*          e_value     = lv_cacid.
+*      IF lv_cacid IS NOT INITIAL.
+*        SELECT SINGLE pernr INTO @lv_pernr
+*            FROM pa0105
+*            WHERE usrid = @lv_cacid.
+*      ENDIF.
+*      IF sy-subrc NE 0.
+*
+*        CALL METHOD pr_data_changed->get_cell_value
+*          EXPORTING
+*            i_row_id    = ls_current_cell-row_id
+*            i_fieldname = 'PERID'
+*          IMPORTING
+*            e_value     = lv_perid.
+*        IF lv_perid IS NOT INITIAL.
+*          SELECT SINGLE pernr INTO @lv_pernr
+*            FROM pa0105
+*            WHERE usrid = @lv_perid.
+*        ENDIF.
+*        IF sy-subrc NE 0.
+*
+*          CALL METHOD pr_data_changed->get_cell_value
+*            EXPORTING
+*              i_row_id    = ls_current_cell-row_id
+*              i_fieldname = 'AUID'
+*            IMPORTING
+*              e_value     = lv_auid.
+*          IF lv_auid IS NOT INITIAL.
+*            SELECT SINGLE pernr INTO @lv_pernr
+*                FROM pa0105
+*                WHERE usrid = @lv_auid.
+*          ENDIF.
+*          IF sy-subrc NE 0.
+*
+*
+***** CACID/AUID/SSN not  found  when action = 1 - Show red and message
+*            pr_data_changed->modify_cell(
+*              EXPORTING
+*                i_row_id    = ls_current_cell-row_id
+*                i_tabix     = ls_current_cell-tabix
+*                i_fieldname = 'LIGHT'
+*                i_value     = '1' ).
+*
+*            pr_data_changed->modify_cell(
+*              EXPORTING
+*                i_row_id    = ls_current_cell-row_id
+*                i_tabix     = ls_current_cell-tabix
+*                i_fieldname = 'TYPE'
+*                i_value     = 'E' ).
+*
+*            pr_data_changed->modify_cell(
+*              EXPORTING
+*                i_row_id    = ls_current_cell-row_id
+*                i_tabix     = ls_current_cell-tabix
+*                i_fieldname = 'MESSAGE'
+*                i_value     = 'Please enter valid CACID,  SSN or AUID' ).
+*************************************************************
+*
+*          ENDIF.
+*        ENDIF.
+*      ENDIF.
+*    ENDIF.
+
+
+
+
+
+    IF lv_pernr IS NOT INITIAL.
+
+**** Pernr present when action = 1 - Show red and message
+      IF lv_action = 1.
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = 'Pernr already exists for CACID, SSN or AUID' ).
+      ELSE.
+      ENDIF.
+************************************************************
+
+*-- Update PERNR to ALV grid
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'PERNR'
+          i_value     = lv_pernr ).
+
+
+** ( COLUMN_NAME = 'USER ID' TABLE_NAME = 'PA0105_0001' FIELD_NAME = 'USRID' ALV_FIELD = 'UNAME'  )
+*  ( column_name = 'EMAIL' table_name = 'PA0105_0010' field_name = 'USRID' alv_field = 'EMAIL'  )
+*  ( column_name = 'CAC_ID' table_name = 'PA0105_9000' field_name = 'USRID' alv_field = 'CACID' )
+*  ( column_name = 'AUID' table_name = 'PA0105_9001' field_name = 'USRID' alv_field = 'AUID' )
+* ( column_name = 'ACTION' table_name = 'LS_FLAGS' field_name = 'ACTION' alv_field = 'ACTION')
+*    ).
+
+      SELECT *
+        INTO TABLE @DATA(lt_pa0105_9000_usrid)
+        FROM pa0105
+        WHERE pernr = @lv_pernr
+          AND subty = '9000' "CAC ID
+          AND endda GE @sy-datum
+          ORDER BY PRIMARY KEY .
+        IF sy-subrc = 0.
+          SORT lt_pa0105_9000_usrid  BY endda DESCENDING.
+          READ TABLE lt_pa0105_9000_usrid  INTO DATA(lv_pa0105_9000) INDEX 1.
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'CACID'
+            i_value     = lv_pa0105_9000-usrid ).
+      ENDIF.
+
+      SELECT *
+*        usrid
+      INTO TABLE @DATA(lt_pa0105_9001_usrid)
+        FROM pa0105
+        WHERE pernr = @lv_pernr
+          AND subty = '9001' "AU ID
+          AND endda GE @sy-datum
+          ORDER BY PRIMARY KEY .
+        IF sy-subrc = 0.
+          SORT lt_pa0105_9001_usrid  BY endda DESCENDING.
+          READ TABLE lt_pa0105_9001_usrid  INTO DATA(lv_pa0105_9001) INDEX 1.
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'AUID'
+            i_value     = lv_pa0105_9001-usrid ).
+      ENDIF.
+
+
+      SELECT *
+*        usrid
+        INTO TABLE @DATA(lt_pa0105_9002_usrid)
+        FROM pa0105
+        WHERE pernr = @lv_pernr
+          AND subty = '9002' "SSN
+          AND endda GE @sy-datum
+          ORDER BY PRIMARY KEY .
+        IF sy-subrc = 0.
+          SORT lt_pa0105_9002_usrid  BY endda DESCENDING.
+          READ TABLE lt_pa0105_9002_usrid  INTO DATA(lv_pa0105_9002) INDEX 1.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'PERID'
+            i_value     = lv_pa0105_9002-usrid ).
+      ENDIF.
+
+
+
+*-- read data from interface using CAC ID
+      IF lv_pa0105_9000-usrid IS NOT INITIAL
+        OR lv_pa0105_9002-usrid IS NOT INITIAL.
+
+        DATA: ls_intf_data TYPE t_main_stru.
+        DATA(lo_milpds) = NEW zau_cl_milpds('P').
+        DATA:
+          ls_p0002 TYPE p0002, "HR Master Record: Infotype 0002 (Personal Data)
+          lt_p0006 TYPE TABLE OF p0006,  "HR Master Record: Infotype 0006 (Addresses)
+          lt_p0105 TYPE TABLE OF p0105.  "HR Master Record: Infotype 0105 (Communication)
+
+        CLEAR: ls_intf_data.
+        DATA: lv_dodid TYPE zaudodid.
+        DATA: lv_ssn  TYPE prdni.
+        lv_dodid = lv_pa0105_9000-usrid. "<ls_alv_table>-cacid.
+        lv_ssn = lv_pa0105_9002-usrid.
+
+
+        SELECT * INTO TABLE @DATA(lt_db_lastname)
+          FROM pa0002
+          WHERE pernr = @lv_pernr
+          AND endda GE @sy-datum
+          ORDER BY PRIMARY KEY .
+        IF sy-subrc = 0.
+          SORT lt_db_lastname  BY endda DESCENDING.
+          READ TABLE lt_db_lastname  INTO DATA(ls_db_lastname) INDEX 1.
+        ENDIF.
+
+*-- Old Method call
+*        CALL METHOD lo_milpds->get_data
+*          EXPORTING
+*            iv_ssn      = lv_ssn
+*            iv_dodid    = lv_dodid
+**           iv_gbdat    = ''
+*            iv_lastname = lv_db_lastname
+*          IMPORTING
+**           ES_HRI1702  =
+**           ES_HRI1704  =
+**           ES_HRI9801  =
+**           ES_HRI9802  =
+**           ET_ADRC     =
+**           EV_ACTIVEMILITARY =
+*            es_p0002    = ls_p0002
+*            et_p0006    = lt_p0006
+*            et_p0105    = lt_p0105.
+
+*-- New method call
+        CALL METHOD lo_student_master->process_student_record
+          EXPORTING
+            iv_prdni          = lv_ssn     "?
+            iv_dodid          = lv_dodid
+*           iv_objid          =
+            iv_lastname       = ls_db_lastname-nachn
+*           iv_gbdat          =
+            iv_update         = abap_true  "?
+*           iv_create_userid  =
+*           iv_email          =
+*           iv_workphone      =
+            iv_deers_only     = abap_true
+          IMPORTING
+*           es_hri1702        =
+*           es_hri1704        =
+*           es_hri9801        =
+*           es_hri9802        =
+*           et_adrc           =
+*           ev_studentnumber  =
+*           et_adrc_new       =
+*           ev_st_objid       =
+*           ev_password       =
+*           ev_userid         =
+            es_p0002          = ls_p0002
+            et_p0006          = lt_p0006
+            et_p0105          = lt_p0105
+            ev_dodid          = lv_intf_dodid
+*           ev_activemilitary =
+            ev_does_not_exist = lv_does_not_exist
+*           et_return         =
+          .
+
+        MOVE-CORRESPONDING ls_p0002 TO ls_intf_data-pa0002.
+
+        READ TABLE lt_p0006 INTO DATA(ls_p0006_1)  INDEX 1.
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0006_1 TO ls_intf_data-pa0006_1.
+        ENDIF.
+        READ TABLE lt_p0006 INTO DATA(ls_p0006_2)  INDEX 2.
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0006_2 TO ls_intf_data-pa0006_2.
+        ENDIF.
+
+*       This field will not be overwritten from interface
+*       READ TABLE lt_p0105 INTO DATA(ls_p0105_0001)  WITH KEY subty = '0001'. "SAP System generated User id
+
+        READ TABLE lt_p0105 INTO DATA(ls_p0105_0010)  WITH KEY subty = '0010'. "Email id
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0105_0010 TO  ls_intf_data-pa0105_0010.
+        ENDIF.
+        READ TABLE lt_p0105 INTO DATA(ls_p0105_9000)  WITH KEY subty = '9000'.  " CAC ID
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0105_9000 TO  ls_intf_data-pa0105_9000.
+        ENDIF.
+        READ TABLE lt_p0105 INTO DATA(ls_p0105_9001)  WITH KEY subty = '9001'.  " AU ID
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0105_9001 TO  ls_intf_data-pa0105_9001.
+        ENDIF.
+        READ TABLE lt_p0105 INTO DATA(ls_p0105_9002)  WITH KEY subty = '9002'.  " SSN
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0105_9002 TO  ls_intf_data-pa0105_9002.
+        ENDIF.
+
+      ENDIF.
+
+
+
+      SELECT  * INTO TABLE @DATA(lt_pa0000) " @gs_db_data-pa0000
+        FROM pa0000
+        WHERE pernr = @lv_pernr
+*        AND begda LE @sy-datum.
+        AND endda GE @sy-datum
+        ORDER BY PRIMARY KEY .
+      IF sy-subrc = 0.
+        SORT lt_pa0000 BY endda DESCENDING.
+        READ TABLE lt_pa0000 INTO gs_db_data-pa0000 INDEX 1.
+*  ( column_name = 'EFFECTIVE_DATE' table_name = 'PA0000' field_name = 'BEGDA' alv_field = 'BEGDA' )
+*  ( column_name = 'REASON' table_name = 'PA0000' field_name = 'MASSG' alv_field = 'MASSG' )
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'BEGDA'
+            i_value     = gs_db_data-pa0000-begda ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'MASSG'
+            i_value     = gs_db_data-pa0000-massg ).
+
+      ENDIF.
+
+      SELECT * INTO TABLE @DATA(lt_pa0001) "@gs_db_data-pa0001
+        FROM pa0001
+        WHERE pernr = @lv_pernr
+          AND endda GE @sy-datum
+        ORDER BY PRIMARY KEY.
+*        AND begda LE @sy-datum.
+      IF sy-subrc = 0.
+        SORT lt_pa0001 BY endda DESCENDING.
+        READ TABLE lt_pa0001 INTO gs_db_data-pa0001 INDEX 1.
+
+*  ( column_name = 'POSITION_ID' table_name = 'PA0001' field_name = 'PLANS' alv_field = 'PLANS' )
+*  ( column_name = 'SERVICE_RANK_PAYGRADE' table_name = 'PA0001' field_name = 'ANSVH' alv_field = 'ANSVH' )
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'PLANS'
+            i_value     = gs_db_data-pa0001-plans ).
+
+        SELECT SINGLE short FROM hrp1000 INTO @DATA(lv_hrp1000_short2)
+          WHERE  plvar = '01'
+              AND otype = 'S'
+              AND endda GE @sy-datum
+            AND objid = @gs_db_data-pa0001-plans.
+        IF sy-subrc EQ 0.
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'SHORT'
+              i_value     = lv_hrp1000_short2 ).
+        ENDIF.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'ANSVH'
+            i_value     = gs_db_data-pa0001-ansvh ).
+      ENDIF.
+
+      SELECT * INTO TABLE @DATA(lt_pa0002) "@gs_db_data-pa0002
+        FROM pa0002
+        WHERE pernr = @lv_pernr
+          AND endda GE @sy-datum
+        ORDER BY PRIMARY KEY.
+*        AND begda LE @sy-datum.
+      IF sy-subrc = 0.
+        SORT lt_pa0002 BY endda DESCENDING.
+        READ TABLE lt_pa0002 INTO gs_db_data-pa0002 INDEX 1.
+*  ( column_name = 'LAST_NAME' table_name = 'PA0002' field_name = 'NACHN' alv_field = 'NACHN' )
+*  ( column_name = 'FIRST_NAME' table_name = 'PA0002' field_name = 'VORNA' alv_field = 'VORNA' )
+*  ( column_name = 'DATE_OF_BIRTH' table_name = 'PA0002' field_name = 'GBDAT' alv_field = 'GBDAT' )
+
+
+        "*Overlay interface data
+        IF ls_intf_data-pa0002 IS NOT INITIAL.
+          gs_db_data-pa0002-nachn = ls_intf_data-pa0002-nachn.
+          gs_db_data-pa0002-vorna = ls_intf_data-pa0002-vorna.
+          gs_db_data-pa0002-gbdat = ls_intf_data-pa0002-gbdat.
+        ENDIF.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'NACHN'
+            i_value     = gs_db_data-pa0002-nachn ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'VORNA'
+            i_value     = gs_db_data-pa0002-vorna ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'GBDAT'
+            i_value     = gs_db_data-pa0002-gbdat ).
+
+      ENDIF.
+
+      SELECT * INTO TABLE @DATA(lt_pa0006_1) "@gs_db_data-pa0006_1
+        FROM pa0006
+        WHERE pernr = @lv_pernr
+          AND subty = '1'
+          AND endda GE @sy-datum
+        ORDER BY PRIMARY KEY.
+*        AND begda LE @sy-datum.
+      IF sy-subrc = 0.
+        SORT lt_pa0006_1 BY endda DESCENDING.
+        READ TABLE lt_pa0006_1 INTO gs_db_data-pa0006_1 INDEX 1.
+
+*--  Overlay interface data on SAP data when present
+        IF ls_intf_data-pa0006_1 IS NOT INITIAL.
+          gs_db_data-pa0006_1-stras = ls_intf_data-pa0006_1-stras.
+          gs_db_data-pa0006_1-ort01 = ls_intf_data-pa0006_1-ort01.
+          gs_db_data-pa0006_1-state = ls_intf_data-pa0006_1-state.
+          gs_db_data-pa0006_1-pstlz = ls_intf_data-pa0006_1-pstlz.
+          gs_db_data-pa0006_1-land1 = ls_intf_data-pa0006_1-land1.
+        ENDIF.
+
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'STRAS'
+            i_value     = gs_db_data-pa0006_1-stras ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'ORT01'
+            i_value     = gs_db_data-pa0006_1-ort01 ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'STATE'
+            i_value     = gs_db_data-pa0006_1-state ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'PSTLZ'
+            i_value     = gs_db_data-pa0006_1-pstlz ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'LAND1'
+            i_value     = gs_db_data-pa0006_1-land1 ).
+
+      ENDIF.
+
+      SELECT * INTO TABLE @DATA(lt_pa0006_2)  "@gs_db_data-pa0006_2
+        FROM pa0006
+        WHERE pernr = @lv_pernr
+          AND subty = '2'
+          AND endda GE @sy-datum
+        ORDER BY PRIMARY KEY.
+*        AND begda LE @sy-datum.
+      IF sy-subrc = 0.
+        SORT lt_pa0006_2 BY endda DESCENDING.
+        READ TABLE lt_pa0006_2 INTO gs_db_data-pa0006_2 INDEX 1.
+
+*--  Overlay interface data on SAP data when present
+        IF ls_intf_data-pa0006_2 IS NOT INITIAL.
+          gs_db_data-pa0006_2-stras = ls_intf_data-pa0006_2-stras.
+          gs_db_data-pa0006_2-ort01 = ls_intf_data-pa0006_2-ort01.
+          gs_db_data-pa0006_2-state = ls_intf_data-pa0006_2-state.
+          gs_db_data-pa0006_2-pstlz = ls_intf_data-pa0006_2-pstlz.
+          gs_db_data-pa0006_2-land1 = ls_intf_data-pa0006_2-land1.
+        ENDIF.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'STRAS2'
+            i_value     = gs_db_data-pa0006_2-stras ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'ORT012'
+            i_value     = gs_db_data-pa0006_2-ort01 ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'STATE2'
+            i_value     = gs_db_data-pa0006_2-state ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'PSTLZ2'
+            i_value     = gs_db_data-pa0006_2-pstlz ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'LAND12'
+            i_value     = gs_db_data-pa0006_2-land1 ).
+      ENDIF.
+
+
+
+      SELECT *
+*        usrid, usrid_long
+        INTO TABLE @DATA(lt_pa0105_0010_userid)  "@DATA(ls_pa0105_0010_userid)
+        FROM pa0105
+        WHERE pernr = @lv_pernr
+          AND subty = '0010' "EMAIL
+          AND endda GE @sy-datum
+        ORDER BY PRIMARY KEY.
+*        AND begda LE @sy-datum.
+      IF sy-subrc = 0.
+        SORT lt_pa0105_0010_userid BY endda DESCENDING.
+        READ TABLE lt_pa0105_0010_userid INTO DATA(ls_pa0105_0010) INDEX 1.
+
+
+*--  Overlay interface data on SAP data when present
+        IF ls_intf_data-pa0105_0010-usrid IS NOT INITIAL
+          OR ls_intf_data-pa0105_0010-usrid_long IS NOT INITIAL.
+          ls_pa0105_0010-usrid_long = ls_intf_data-pa0105_0010-usrid.
+          IF ls_intf_data-pa0105_0010-usrid IS INITIAL.
+            ls_pa0105_0010-usrid_long = ls_intf_data-pa0105_0010-usrid_long.
+          ENDIF.
+        ENDIF.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'EMAIL'
+            i_value     = ls_pa0105_0010-usrid_long ).
+      ENDIF.
+
+
+*      ENDIF.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+  METHOD read_intf_data.
+
+    CLEAR gs_db_data.
+
+********************
+*-- Read interface data
+********************
+    DATA: lv_perid     TYPE prdni,
+          lv_auid      TYPE prdni,
+          lv_cacid     TYPE prdni,
+
+          lv_pernr     TYPE pernr_d,
+          lv_last_name TYPE char50,
+
+          lv_action    TYPE c.
+
+    DATA: lv_error TYPE c.
+    lv_error = abap_false.
+
+
+    READ TABLE  pr_data_changed->mt_good_cells INTO DATA(ls_current_cell) INDEX 1.
+    CHECK sy-subrc = 0.
+*    pr_data_changed->modify_cell(
+*      EXPORTING
+*        i_row_id    = ls_current_cell-row_id
+*        i_tabix     = ls_current_cell-tabix
+*        i_fieldname = 'LIGHT'
+*        i_value     = '3' ).
+*
+*    pr_data_changed->modify_cell(
+*      EXPORTING
+*        i_row_id    = ls_current_cell-row_id
+*        i_tabix     = ls_current_cell-tabix
+*        i_fieldname = 'TYPE'
+*        i_value     = '' ).
+*    lv_error = abap_false.
+*
+*    pr_data_changed->modify_cell(
+*      EXPORTING
+*        i_row_id    = ls_current_cell-row_id
+*        i_tabix     = ls_current_cell-tabix
+*        i_fieldname = 'MESSAGE'
+*        i_value     = '' ).
+
+
+
+*    CHECK
+*      ls_current_cell-fieldname =  'PERID'
+*     OR ls_current_cell-fieldname =  'NACHN'  "Last_name
+*     OR ls_current_cell-fieldname =  'CACID'.
+
+
+*-- check action = 1  and pernr
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_fieldname = 'PERNR'
+      IMPORTING
+        e_value     = lv_pernr.
+
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_fieldname = 'ACTION'
+      IMPORTING
+        e_value     = lv_action.
+
+    CHECK lv_action = '1' AND lv_pernr IS INITIAL.
+
+*    IF ls_current_cell-fieldname = 'NACHN'  "Last_name
+*    OR ls_current_cell-fieldname = 'PERID'.
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_fieldname = 'NACHN'
+      IMPORTING
+        e_value     = lv_last_name.
+    "When Last name is entered get SSN also
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_fieldname = 'PERID'
+      IMPORTING
+        e_value     = lv_perid.
+
+*    IF ls_current_cell-fieldname = 'CACID'.
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ls_current_cell-row_id
+        i_fieldname = 'CACID'
+      IMPORTING
+        e_value     = lv_cacid.
+*    ENDIF.
+
+*    ENDIF.
+
+
+
+
+    IF ( lv_perid IS INITIAL
+      OR lv_last_name IS INITIAL )
+      AND lv_cacid IS INITIAL.
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'LIGHT'
+          i_value     = '1' ).
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'TYPE'
+          i_value     = 'E' ).
+      lv_error = abap_true.
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'MESSAGE'
+          i_value     = 'Please enter SSN Number and Last Name ' ).
+
+    ENDIF.
+
+    IF  lv_perid IS INITIAL
+        AND lv_last_name IS INITIAL
+        AND  lv_cacid IS INITIAL.
+
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'LIGHT'
+          i_value     = '1' ).
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'TYPE'
+          i_value     = 'E' ).
+      lv_error = abap_true.
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'MESSAGE'
+          i_value     = 'Please enter SSN No and Last Name or CAC id ' ).
+    ENDIF.
+
+    DATA(lv_ssn_len) = strlen( lv_perid ).
+    IF  lv_perid IS NOT INITIAL
+*      AND lv_ssn_len NE 9.
+      AND lv_ssn_len LT 9.
+
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'LIGHT'
+          i_value     = '1' ).
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'TYPE'
+          i_value     = 'E' ).
+      lv_error = abap_true.
+
+      pr_data_changed->modify_cell(
+        EXPORTING
+          i_row_id    = ls_current_cell-row_id
+          i_tabix     = ls_current_cell-tabix
+          i_fieldname = 'MESSAGE'
+          i_value     = 'Please enter more than 9 digits for SSN No ' ).
+    ENDIF.
+
+    CHECK : lv_error = abap_false.
+
+
+*-- read data from interface using CAC ID
+    IF ( lv_perid IS NOT INITIAL
+        AND lv_ssn_len = 9
+        AND lv_last_name IS NOT INITIAL )
+      OR lv_cacid IS NOT INITIAL.
+
+      DATA: ls_intf_data TYPE t_main_stru.
+      DATA(lo_milpds) = NEW zau_cl_milpds('P').
+      DATA(lo_student_master) = NEW zcl_au_studentmaster( ).
+      DATA:
+        ls_p0002 TYPE p0002, "HR Master Record: Infotype 0002 (Personal Data)
+        lt_p0006 TYPE TABLE OF p0006,  "HR Master Record: Infotype 0006 (Addresses)
+        lt_p0105 TYPE TABLE OF p0105.  "HR Master Record: Infotype 0105 (Communication)
+
+      CLEAR: ls_intf_data.
+      DATA: lv_dodid TYPE zaudodid.
+      DATA: lv_intf_dodid TYPE zaudodid.
+      DATA: lv_does_not_exist TYPE char01.
+      DATA: lv_ssn  TYPE prdni.
+
+      lv_dodid = lv_cacid. "<ls_alv_table>-cacid.
+      lv_ssn = lv_perid.
+      lv_does_not_exist = abap_false.
+
+*--  replace method call
+
+*-- Old method call
+**      CALL METHOD lo_milpds->get_data
+**        EXPORTING
+**          iv_ssn            = lv_ssn
+**          iv_dodid          = lv_dodid
+***         iv_gbdat          = ''
+**          iv_lastname       = lv_last_name
+**          iv_deers_only     = abap_true
+**        IMPORTING
+***         es_hri1702        =
+***         es_hri1704        =
+***         es_hri9801        =
+***         es_hri9802        =
+***         et_adrc           =
+***         et_adrc_new       =
+***         et_email          =
+***         ev_activemilitary =
+***         ev_does_not_exist =
+**          ev_dodid          = lv_intf_dodid
+**          es_p0002          = ls_p0002
+**          et_p0006          = lt_p0006
+**          et_p0105          = lt_p0105
+**          ev_does_not_exist = lv_does_not_exist
+***         ev_email          =
+***         ev_workphone      =
+**        .
+
+*-- New method call
+      CALL METHOD lo_student_master->process_student_record
+        EXPORTING
+          iv_prdni          = lv_ssn     "?
+          iv_dodid          = lv_dodid
+*         iv_objid          =
+          iv_lastname       = lv_last_name
+*         iv_gbdat          =
+          iv_update         = abap_true  "?
+*         iv_create_userid  =
+*         iv_email          =
+*         iv_workphone      =
+          iv_deers_only     = abap_true
+        IMPORTING
+*         es_hri1702        =
+*         es_hri1704        =
+*         es_hri9801        =
+*         es_hri9802        =
+*         et_adrc           =
+*         ev_studentnumber  =
+*         et_adrc_new       =
+*         ev_st_objid       =
+*         ev_password       =
+*         ev_userid         =
+          es_p0002          = ls_p0002
+          et_p0006          = lt_p0006
+          et_p0105          = lt_p0105
+          ev_dodid          = lv_intf_dodid
+*         ev_activemilitary =
+          ev_does_not_exist = lv_does_not_exist
+*         et_return         =
+        .
+
+
+
+      IF lv_does_not_exist = abap_true.
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = 'CACID or SSN  not exists or not active in MilPds/Deers' ).
+
+        pr_data_changed->modify_cell(
+            i_row_id    = ls_current_cell-row_id
+            i_tabix     = ls_current_cell-tabix
+            i_fieldname = 'INTF_NFND'
+            i_value     = 'X' ).
+
+      ENDIF.
+
+      IF lv_intf_dodid IS NOT INITIAL.
+
+
+        MOVE-CORRESPONDING ls_p0002 TO ls_intf_data-pa0002.
+
+        READ TABLE lt_p0006 INTO DATA(ls_p0006_1)  INDEX 1.
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0006_1 TO ls_intf_data-pa0006_1.
+        ENDIF.
+        READ TABLE lt_p0006 INTO DATA(ls_p0006_2)  INDEX 2.
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0006_2 TO ls_intf_data-pa0006_2.
+        ENDIF.
+
+*       This field will not be overwritten from interface
+*       READ TABLE lt_p0105 INTO DATA(ls_p0105_0001)  WITH KEY subty = '0001'. "SAP System generated User id
+
+        READ TABLE lt_p0105 INTO DATA(ls_p0105_0010)  WITH KEY subty = '0010'. "Email id
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0105_0010 TO  ls_intf_data-pa0105_0010.
+        ENDIF.
+        READ TABLE lt_p0105 INTO DATA(ls_p0105_9000)  WITH KEY subty = '9000'.  " CAC ID
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0105_9000 TO  ls_intf_data-pa0105_9000.
+        ENDIF.
+        READ TABLE lt_p0105 INTO DATA(ls_p0105_9001)  WITH KEY subty = '9001'.  " AU ID
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0105_9001 TO  ls_intf_data-pa0105_9001.
+        ENDIF.
+        READ TABLE lt_p0105 INTO DATA(ls_p0105_9002)  WITH KEY subty = '9002'.  " SSN
+        IF sy-subrc = 0.
+          MOVE-CORRESPONDING ls_p0105_9002 TO  ls_intf_data-pa0105_9002.
+        ENDIF.
+
+
+        ls_intf_data-pa0105_9000-usrid  = lv_intf_dodid.
+        IF ls_intf_data-pa0105_9000-usrid IS NOT INITIAL.
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'CACID'
+              i_value     = ls_intf_data-pa0105_9000-usrid ).  "lv_pa0105_9000_usrid ).
+        ENDIF.
+
+
+        "If SSN is blank replace with CAC ID
+        IF ls_intf_data-pa0105_9002-usrid IS INITIAL.
+          ls_intf_data-pa0105_9002-usrid = lv_intf_dodid.
+        ENDIF.
+
+        IF ls_intf_data-pa0105_9002-usrid IS NOT INITIAL.
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'PERID'
+              i_value     = ls_intf_data-pa0105_9002-usrid ).  "lv_pa0105_9002_usrid ).
+        ENDIF.
+
+
+        "If AUID is blank replace with CAC ID
+        IF ls_intf_data-pa0105_9001-usrid IS INITIAL.
+          ls_intf_data-pa0105_9001-usrid = lv_intf_dodid.
+        ENDIF.
+
+        IF ls_intf_data-pa0105_9001-usrid IS NOT INITIAL.
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'AUID'
+              i_value     = ls_intf_data-pa0105_9001-usrid ).
+        ENDIF.
+
+
+        "*Overlay interface data
+        IF ls_intf_data-pa0002 IS NOT INITIAL.
+          gs_db_data-pa0002-nachn = ls_intf_data-pa0002-nachn.
+          gs_db_data-pa0002-vorna = ls_intf_data-pa0002-vorna.
+          gs_db_data-pa0002-gbdat = ls_intf_data-pa0002-gbdat.
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'NACHN'
+              i_value     = gs_db_data-pa0002-nachn ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'VORNA'
+              i_value     = gs_db_data-pa0002-vorna ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'GBDAT'
+              i_value     = gs_db_data-pa0002-gbdat ).
+
+        ENDIF.
+
+
+*--  Overlay interface data on SAP data when present
+        IF ls_intf_data-pa0006_1 IS NOT INITIAL.
+          gs_db_data-pa0006_1-stras = ls_intf_data-pa0006_1-stras.
+          gs_db_data-pa0006_1-ort01 = ls_intf_data-pa0006_1-ort01.
+          gs_db_data-pa0006_1-state = ls_intf_data-pa0006_1-state.
+          gs_db_data-pa0006_1-pstlz = ls_intf_data-pa0006_1-pstlz.
+          gs_db_data-pa0006_1-land1 = ls_intf_data-pa0006_1-land1.
+
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'STRAS'
+              i_value     = gs_db_data-pa0006_1-stras ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'ORT01'
+              i_value     = gs_db_data-pa0006_1-ort01 ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'STATE'
+              i_value     = gs_db_data-pa0006_1-state ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'PSTLZ'
+              i_value     = gs_db_data-pa0006_1-pstlz ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'LAND1'
+              i_value     = gs_db_data-pa0006_1-land1 ).
+
+        ENDIF.
+
+
+*--  Overlay interface data on SAP data when present
+        IF ls_intf_data-pa0006_2 IS NOT INITIAL.
+          gs_db_data-pa0006_2-stras = ls_intf_data-pa0006_2-stras.
+          gs_db_data-pa0006_2-ort01 = ls_intf_data-pa0006_2-ort01.
+          gs_db_data-pa0006_2-state = ls_intf_data-pa0006_2-state.
+          gs_db_data-pa0006_2-pstlz = ls_intf_data-pa0006_2-pstlz.
+          gs_db_data-pa0006_2-land1 = ls_intf_data-pa0006_2-land1.
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'STRAS2'
+              i_value     = gs_db_data-pa0006_2-stras ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'ORT012'
+              i_value     = gs_db_data-pa0006_2-ort01 ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'STATE2'
+              i_value     = gs_db_data-pa0006_2-state ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'PSTLZ2'
+              i_value     = gs_db_data-pa0006_2-pstlz ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'LAND12'
+              i_value     = gs_db_data-pa0006_2-land1 ).
+
+        ENDIF.
+
+
+*--  Overlay interface data on SAP data when present
+*      IF ls_intf_data-pa0105_0010-usrid IS NOT INITIAL
+*        OR ls_intf_data-pa0105_0010-usrid_long IS NOT INITIAL.
+*        ls_pa0105_0010_userid-usrid_long = ls_intf_data-pa0105_0010-usrid.
+*        IF ls_intf_data-pa0105_0010-usrid IS INITIAL.
+*          ls_pa0105_0010_userid-usrid_long = ls_intf_data-pa0105_0010-usrid_long.
+*        ENDIF.
+*      ENDIF.
+        IF ls_intf_data-pa0105_0010-usrid_long IS NOT INITIAL.
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'EMAIL'
+              i_value     = ls_intf_data-pa0105_0010-usrid_long ).
+        ENDIF.
+
+
+
+*---   disable fields for input when interface data found
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'VORNA' "First Name
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'GBDAT' "Date of birth
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'STRAS' "STREET_AND_HOUSE_NO
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'ORT01' "'CITY'
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'STATE'
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'PSTLZ' "POSTAL_CODE'
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'LAND1' "COUNTRY'
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'STRAS2' "STREET_AND_HOUSE_NO
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'ORT012' "'CITY'
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'STATE2'
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'PSTLZ2' "POSTAL_CODE'
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+        pr_data_changed->modify_style(
+            i_row_id    = ls_current_cell-row_id
+            i_fieldname = 'LAND12' "COUNTRY'
+            i_style     = cl_gui_alv_grid=>mc_style_disabled ).
+
+
+      ELSE.
+
+
+
+        IF ls_intf_data-pa0105_9002-usrid IS NOT INITIAL.  "SSN Not initial
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'LIGHT'
+              i_value     = '1' ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'TYPE'
+              i_value     = 'E' ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'MESSAGE'
+              i_value     = 'Person cannot be added or updated without an assigned CACID' ).
+
+        ELSE.
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'LIGHT'
+              i_value     = '2' ).
+
+          pr_data_changed->modify_cell(
+            EXPORTING
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'TYPE'
+              i_value     = 'I' ).
+
+          pr_data_changed->modify_cell(
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'MESSAGE'
+              i_value     = 'CACID  or SSN/Lastname not found in Milpds /Deers,  Please enter manually' ).
+
+          pr_data_changed->modify_cell(
+              i_row_id    = ls_current_cell-row_id
+              i_tabix     = ls_current_cell-tabix
+              i_fieldname = 'INTF_NFND'
+              i_value     = 'X' ).
+
+
+
+*---   Enable fields for input when interface data not found
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'VORNA' "First Name
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'GBDAT' "Date of birth
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'STRAS' "STREET_AND_HOUSE_NO
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'ORT01' "'CITY'
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'STATE'
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'PSTLZ' "POSTAL_CODE'
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'LAND1' "COUNTRY'
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+
+*          pr_data_changed->modify_cell(
+*            EXPORTING
+*              i_row_id    = ls_current_cell-row_id
+*              i_tabix     = ls_current_cell-tabix
+*              i_fieldname = 'LAND1'
+*              i_value     = 'US' ).
+
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'STRAS2' "STREET_AND_HOUSE_NO
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'ORT012' "'CITY'
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'STATE2'
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'PSTLZ2' "POSTAL_CODE'
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+          pr_data_changed->modify_style(
+              i_row_id    = ls_current_cell-row_id
+              i_fieldname = 'LAND12' "COUNTRY'
+              i_style     = cl_gui_alv_grid=>mc_style_enabled ).
+
+*          pr_data_changed->modify_cell(
+*            EXPORTING
+*              i_row_id    = ls_current_cell-row_id
+*              i_tabix     = ls_current_cell-tabix
+*              i_fieldname = 'LAND12'
+*              i_value     = 'US' ).
+
+        ENDIF.
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+
+  METHOD perform_semantic_checks.
+*
+* In this snenario, only values of cells in columns CLASS or SMOKER
+* can be changed. These fields have a value range defined
+* in the ABAP dictionary.
+* Thus, after ALVs syntaktical check, we only need to
+* check if the user tried to enter a smoker seat for
+* a class other than 'F' or vice versa.
+*
+    DATA: ls_good TYPE lvc_s_modi.
+
+    LOOP AT pr_data_changed->mt_good_cells INTO ls_good.
+      CASE ls_good-fieldname.
+
+        WHEN 'PERID'.
+          CALL METHOD check_perid
+            EXPORTING
+              ps_good_perid   = ls_good
+              pr_data_changed = pr_data_changed.
+
+        WHEN 'CACID'.
+          CALL METHOD check_cacid
+            EXPORTING
+              ps_good_cacid   = ls_good
+              pr_data_changed = pr_data_changed.
+
+        WHEN 'AUID'.
+          CALL METHOD check_auid
+            EXPORTING
+              ps_good_auid    = ls_good
+              pr_data_changed = pr_data_changed.
+
+        WHEN 'EMAIL'.
+          CALL METHOD check_email
+            EXPORTING
+              ps_good_email   = ls_good
+              pr_data_changed = pr_data_changed.
+
+*        WHEN 'CLASS'.
+*          CALL METHOD check_class
+*            EXPORTING
+*              ps_good_class   = ls_good
+*              pr_data_changed = pr_data_changed.
+      ENDCASE.
+    ENDLOOP.
+
+  ENDMETHOD.                    "perform_semantic_checks
+*--------------------------------------
+  METHOD check_perid.
+    DATA: lv_action     TYPE string,
+          lv_perid      TYPE prdni,
+          l_class       TYPE s_class,
+          ls_good_class TYPE lvc_s_modi.                    "#EC NEEDED
+
+* first get value of action cell:
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ps_good_perid-row_id
+        i_fieldname = 'ACTION'
+      IMPORTING
+        e_value     = lv_action.
+    CHECK lv_action IS NOT INITIAL.
+
+
+* first get value of perid cell:
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ps_good_perid-row_id
+        i_fieldname = ps_good_perid-fieldname
+      IMPORTING
+        e_value     = lv_perid.
+
+    CHECK lv_perid IS NOT INITIAL.
+
+*** If it's a non smoker there is no problem at all
+*** because every value of CLASS shall be possible then.
+**    IF L_SMOKER IS INITIAL.
+**      EXIT.
+**    ENDIF.
+*
+** If not, value of cell CLASS has to be 'F'.
+** First check if the value of field CLASS has been
+** changed/entered newly, too:
+*    READ TABLE PR_DATA_CHANGED->MT_GOOD_CELLS INTO LS_GOOD_CLASS
+*                        WITH KEY ROW_ID    = PS_GOOD_PERID-ROW_ID
+*                                 FIELDNAME = 'PERID'.
+*    IF SY-SUBRC EQ 0.
+** get that new value:
+*      CALL METHOD PR_DATA_CHANGED->GET_CELL_VALUE
+*        EXPORTING
+*          I_ROW_ID    = PS_GOOD_SMOKER-ROW_ID
+*          I_FIELDNAME = 'CLASS'
+*        IMPORTING
+*          E_VALUE     = L_CLASS.
+*    ELSE.
+** get current value
+*      READ TABLE GT_OUTTAB INTO LS_OUTTAB INDEX PS_GOOD_SMOKER-ROW_ID.
+*      L_CLASS = LS_OUTTAB-CLASS.
+*    ENDIF.
+
+    READ TABLE gt_alv_table INTO DATA(ls_alv_table) INDEX ps_good_perid-row_id.
+* Since we have a smoker his class has to be 'F':
+    SELECT SINGLE pernr INTO @DATA(lv_pa0105_9002_pernr)
+      FROM pa0105
+      WHERE subty = '9002' "SSN
+        AND usrid = @lv_perid.
+    IF sy-subrc = 0.
+
+      IF ls_alv_table-action(1) = '1'.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_perid-row_id
+            i_tabix     = ps_good_perid-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_perid-row_id
+            i_tabix     = ps_good_perid-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+*      lv_error = abap_true.
+
+        DATA(lv_msg) = 'Already exists for pernr ' && | { lv_pa0105_9002_pernr ALPHA = OUT } |.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_perid-row_id
+            i_tabix     = ps_good_perid-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = lv_msg ).
+
+*        DATA(lv_msg) = 'Already exists for pernr ' && lv_pa0105_9002_pernr.
+*        CALL METHOD pr_data_changed->add_protocol_entry
+*          EXPORTING
+*            i_msgid     = 'ZPERSON'
+*            i_msgno     = '000'
+*            i_msgty     = 'E'
+*            i_msgv1     = 'SSN already exists for PERNR'           "Klasse
+*            i_msgv2     = lv_pa0105_9002_pernr
+*            i_msgv3     = lv_msg
+*            i_fieldname = ps_good_perid-fieldname
+*            i_row_id    = ps_good_perid-row_id.
+
+        error_in_data = 'X'.
+      ENDIF.
+    ELSE.
+
+      IF ls_alv_table-action(1) NE  '1'.
+
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_perid-row_id
+            i_tabix     = ps_good_perid-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_perid-row_id
+            i_tabix     = ps_good_perid-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+
+        DATA(lv_msg_2) =   | { lv_perid } |  &&  '- SSM Already exists for pernr ' .
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_perid-row_id
+            i_tabix     = ps_good_perid-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = lv_msg_2 ).
+        error_in_data = 'X'.
+
+*        CALL METHOD pr_data_changed->add_protocol_entry
+*          EXPORTING
+*            i_msgid     = 'ZPERSON'
+*            i_msgno     = '000'
+*            i_msgty     = 'E'
+*            i_msgv1     = lv_perid
+*            i_msgv2     = ' - SSN does not exists '           "Klasse
+*            i_fieldname = ps_good_perid-fieldname
+*            i_row_id    = ps_good_perid-row_id.
+
+
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.                    "check_smoker
+*--------------------------------------
+  METHOD check_cacid.
+    DATA: lv_action     TYPE string,
+          lv_cacid      TYPE prdni,
+          l_class       TYPE s_class,
+          ls_good_class TYPE lvc_s_modi.                    "#EC NEEDED
+
+* first get value of action cell:
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ps_good_cacid-row_id
+        i_fieldname = 'ACTION'
+      IMPORTING
+        e_value     = lv_action.
+    CHECK lv_action IS NOT INITIAL.
+
+
+
+* first get value of cacid cell:
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ps_good_cacid-row_id
+        i_fieldname = ps_good_cacid-fieldname
+      IMPORTING
+        e_value     = lv_cacid.
+
+    CHECK lv_cacid IS NOT INITIAL.
+    READ TABLE gt_alv_table INTO DATA(ls_alv_table) INDEX ps_good_cacid-row_id.
+
+* Since we have a smoker his class has to be 'F':
+    SELECT SINGLE pernr INTO @DATA(lv_pa0105_9000_pernr)
+      FROM pa0105
+      WHERE subty = '9000' "CAC ID
+        AND usrid = @lv_cacid.
+    IF sy-subrc = 0.
+
+      IF ls_alv_table-action(1) = '1'.
+
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_cacid-row_id
+            i_tabix     = ps_good_cacid-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_cacid-row_id
+            i_tabix     = ps_good_cacid-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+
+        DATA(lv_msg) = 'Already exists for pernr ' && | { lv_pa0105_9000_pernr ALPHA = OUT } |.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_cacid-row_id
+            i_tabix     = ps_good_cacid-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = lv_msg ).
+
+*        error_in_data = 'X'.
+
+
+
+
+
+*        CALL METHOD pr_data_changed->add_protocol_entry
+*          EXPORTING
+*            i_msgid     = 'ZPERSON'
+*            i_msgno     = '000'
+*            i_msgty     = 'E'
+*            i_msgv1     = 'CAC ID  already exists for PERNR'           "Klasse
+*            i_msgv2     = lv_pa0105_9000_pernr
+*            i_msgv3     = lv_msg
+*            i_fieldname = ps_good_cacid-fieldname
+*            i_row_id    = ps_good_cacid-row_id.
+
+      ELSE.
+*-- Read sap data
+      ENDIF.
+    ELSE.
+
+      IF ls_alv_table-action(1) NE  '1'.
+
+
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_cacid-row_id
+            i_tabix     = ps_good_cacid-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_cacid-row_id
+            i_tabix     = ps_good_cacid-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+
+        DATA(lv_msg_2) =   | { lv_cacid } | &&  ' - CAC ID  does not exists ' .
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_cacid-row_id
+            i_tabix     = ps_good_cacid-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = lv_msg_2 ).
+
+        error_in_data = 'X'.
+
+*        CALL METHOD pr_data_changed->add_protocol_entry
+*          EXPORTING
+*            i_msgid     = 'ZPERSON'
+*            i_msgno     = '000'
+*            i_msgty     = 'E'
+*            i_msgv1     = lv_cacid
+*            i_msgv2     = ' - CAC ID  does not exists '           "Klasse
+*            i_fieldname = ps_good_cacid-fieldname
+*            i_row_id    = ps_good_cacid-row_id.
+
+
+      ENDIF.
+
+    ENDIF.
+  ENDMETHOD.                    "check_smoker
+*--------------------------------------
+  METHOD check_auid.
+    DATA: lv_auid       TYPE prdni,
+          l_class       TYPE s_class,
+          ls_good_class TYPE lvc_s_modi.                    "#EC NEEDED
+
+    DATA: lv_action     TYPE string.
+
+* first get value of action cell:
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ps_good_auid-row_id
+        i_fieldname = 'ACTION'
+      IMPORTING
+        e_value     = lv_action.
+    CHECK lv_action IS NOT INITIAL.
+
+* first get value of perid cell:
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ps_good_auid-row_id
+        i_fieldname = ps_good_auid-fieldname
+      IMPORTING
+        e_value     = lv_auid.
+
+    CHECK lv_auid IS NOT INITIAL.
+    READ TABLE gt_alv_table INTO DATA(ls_alv_table) INDEX ps_good_auid-row_id.
+
+    SELECT SINGLE pernr INTO @DATA(lv_pa0105_9001_pernr)
+      FROM pa0105
+      WHERE subty = '9001' "AU ID
+        AND usrid = @lv_auid.
+    IF sy-subrc = 0.
+
+      IF ls_alv_table-action(1) = '1'.
+
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_auid-row_id
+            i_tabix     = ps_good_auid-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_auid-row_id
+            i_tabix     = ps_good_auid-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+*      lv_error = abap_true.
+
+        DATA(lv_msg) = 'Already exists for pernr ' && | { lv_pa0105_9001_pernr ALPHA = OUT } |.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_auid-row_id
+            i_tabix     = ps_good_auid-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = lv_msg ).
+
+
+*
+*        DATA(lv_msg) = 'Already exists for pernr ' && lv_pa0105_9001_pernr.
+*        CALL METHOD pr_data_changed->add_protocol_entry
+*          EXPORTING
+*            i_msgid     = 'ZPERSON'
+*            i_msgno     = '000'
+*            i_msgty     = 'E'
+*            i_msgv1     = 'AU ID  already exists for PERNR'           "Klasse
+*            i_msgv2     = lv_pa0105_9001_pernr
+*            i_msgv3     = lv_msg
+*            i_fieldname = ps_good_auid-fieldname
+*            i_row_id    = ps_good_auid-row_id.
+
+        error_in_data = 'X'.
+      ELSE.
+*-- Read sap date
+      ENDIF.
+    ELSE.
+
+      IF ls_alv_table-action(1) NE  '1'.
+
+
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_auid-row_id
+            i_tabix     = ps_good_auid-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_auid-row_id
+            i_tabix     = ps_good_auid-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+
+        DATA(lv_msg_2) =  | { lv_auid } |  && ' - AU ID  does not exists ' .
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_auid-row_id
+            i_tabix     = ps_good_auid-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = lv_msg_2 ).
+
+        error_in_data = 'X'.
+
+*        CALL METHOD pr_data_changed->add_protocol_entry
+*          EXPORTING
+*            i_msgid     = 'ZPERSON'
+*            i_msgno     = '000'
+*            i_msgty     = 'E'
+*            i_msgv1     = lv_auid
+*            i_msgv2     = ' - AU ID  does not exists '           "Klasse
+*            i_fieldname = ps_good_auid-fieldname
+*            i_row_id    = ps_good_auid-row_id.
+
+
+      ENDIF.
+
+    ENDIF.
+  ENDMETHOD.                    "check_smoker
+*--------------------------------------
+  METHOD check_email.
+    DATA: lv_email      TYPE prdni,
+          l_class       TYPE s_class,
+          ls_good_class TYPE lvc_s_modi.                    "#EC NEEDED
+
+* first get value of perid cell:
+    CALL METHOD pr_data_changed->get_cell_value
+      EXPORTING
+        i_row_id    = ps_good_email-row_id
+        i_fieldname = ps_good_email-fieldname
+      IMPORTING
+        e_value     = lv_email.
+
+    CHECK lv_email IS NOT INITIAL.
+
+    READ TABLE gt_alv_table INTO DATA(ls_alv_table) INDEX ps_good_email-row_id.
+
+    SELECT SINGLE pernr INTO @DATA(lv_pa0105_0010_pernr)
+      FROM pa0105
+      WHERE subty = '0010' "EMAIL
+        AND ( usrid = @lv_email
+         OR usrid_long = @lv_email ).
+    IF sy-subrc = 0.
+
+      IF ls_alv_table-action(1) = '1'.
+
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_email-row_id
+            i_tabix     = ps_good_email-tabix
+            i_fieldname = 'LIGHT'
+            i_value     = '1' ).
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_email-row_id
+            i_tabix     = ps_good_email-tabix
+            i_fieldname = 'TYPE'
+            i_value     = 'E' ).
+*      lv_error = abap_true.
+
+        DATA(lv_msg) = 'Already exists for pernr ' && | { lv_pa0105_0010_pernr ALPHA = OUT } |.
+
+        pr_data_changed->modify_cell(
+          EXPORTING
+            i_row_id    = ps_good_email-row_id
+            i_tabix     = ps_good_email-tabix
+            i_fieldname = 'MESSAGE'
+            i_value     = lv_msg ).
+
+
+*        DATA(lv_msg) = 'Already exists for pernr ' && lv_pa0105_0010_pernr.
+*        CALL METHOD pr_data_changed->add_protocol_entry
+*          EXPORTING
+*            i_msgid     = 'ZPERSON'
+*            i_msgno     = '000'
+*            i_msgty     = 'E'
+*            i_msgv1     = 'Email already exists for PERNR'           "Klasse
+*            i_msgv2     = lv_pa0105_0010_pernr
+*            i_msgv3     = lv_msg
+*            i_fieldname = ps_good_email-fieldname
+*            i_row_id    = ps_good_email-row_id.
+
+        error_in_data = 'X'.
+      ELSE.
+*-- Read sap date
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.                    "check_smoker
+*--------------------------------------
+*  METHOD check_class.
+*    DATA: l_smoker       TYPE s_smoker,
+*          l_class        TYPE s_class,
+*          ls_outtab      TYPE sbook,
+*          ls_good_smoker TYPE lvc_s_modi.                   "#EC NEEDED
+*
+** first get value of class cell:
+*    CALL METHOD pr_data_changed->get_cell_value
+*      EXPORTING
+*        i_row_id    = ps_good_class-row_id
+*        i_fieldname = ps_good_class-fieldname
+*      IMPORTING
+*        e_value     = l_class.
+*
+** If it's CLASS 'F' there is no problem at all
+** because every value of SMOKER shall be possible then.
+*    IF l_class EQ 'F'.
+*      EXIT.
+*    ENDIF.
+*
+** If not, value of cell SMOKER has to be initial.
+** First check if the value of field CLASS has been
+** changed/entered newly, too:
+*    READ TABLE pr_data_changed->mt_good_cells INTO ls_good_smoker
+*                        WITH KEY row_id    = ps_good_class-row_id
+*                                 fieldname = 'SMOKER'.
+*    IF sy-subrc EQ 0.
+** get that new value:
+*      CALL METHOD pr_data_changed->get_cell_value
+*        EXPORTING
+*          i_row_id    = ps_good_class-row_id
+*          i_fieldname = 'SMOKER'
+*        IMPORTING
+*          e_value     = l_smoker.
+*    ELSE.
+** get current value
+*      READ TABLE gt_outtab INTO ls_outtab INDEX ps_good_class-row_id.
+*      l_smoker = ls_outtab-smoker.
+*    ENDIF.
+*
+** Since the class is not 'F' it has to be a non smoking person:
+*    IF NOT l_smoker IS INITIAL.
+*      CALL METHOD pr_data_changed->add_protocol_entry
+*        EXPORTING
+*          i_msgid     = '0K'
+*          i_msgno     = '000'
+*          i_msgty     = 'W'
+*          i_msgv1     = TEXT-m03         "Als Raucher dürfen Sie Klasse
+*          i_msgv2     = l_class
+*          i_msgv3     = TEXT-m04         "nicht buchen
+*          i_fieldname = ps_good_class-fieldname
+*          i_row_id    = ps_good_class-row_id.
+*
+*      error_in_data = 'X'.
+*    ENDIF.
+*
+*  ENDMETHOD.                    "check_class
+*--------------------------------------
+ENDCLASS.                    "lcl_application_dc IMPLEMENTATION
+***********************************************************************
+
+*CLASS lcl_events_d0100 IMPLEMENTATION.
+***---------------------------------------------------------------------*
+***       METHOD user_command                                           *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method user_command.
+**    perform d0100_event_ucomm using e_ucomm.
+**  endmethod.                    "user_command
+**
+***---------------------------------------------------------------------*
+***       METHOD before_user_command                                    *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method before_user_command.
+**    perform d0100_event_before_ucomm using e_ucomm.
+**  endmethod.                    "before_user_command
+**
+***---------------------------------------------------------------------*
+***       METHOD after_user_command                                     *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method after_user_command.
+**    perform d0100_event_after_ucomm using e_ucomm
+**                                          e_not_processed
+**                                          e_saved.
+**  endmethod.                    "after_user_command
+**
+***---------------------------------------------------------------------*
+***       METHOD double_click                                           *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method double_click.
+**    perform d0100_event_double_click using e_row
+**                                           e_column.
+**  endmethod.                    "double_click
+**
+***---------------------------------------------------------------------*
+***       METHOD hotspot_click                                          *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method hotspot_click.
+***    perform d0100_event_hotspot_click using e_row_id
+***                                            e_column_id.
+**    Gr_grid_d0100->refresh_table_display( ).
+**  endmethod.                    "hotspot_click
+**
+***---------------------------------------------------------------------*
+***       METHOD menu_button                                            *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method menu_button.
+**    perform d0100_event_menu_button using e_object
+**                                          e_ucomm.
+**  endmethod.                    "menu_button
+**
+***---------------------------------------------------------------------*
+***       METHOD toolbar                                                *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method toolbar.
+**    perform d0100_event_toolbar using e_object
+**                                      e_interactive.
+**  endmethod.                    "toolbar
+**
+***---------------------------------------------------------------------*
+***       METHOD context_menu_request                                   *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method context_menu_request.
+**    perform d0100_event_context_menu_reqst using e_object.
+**  endmethod.                    "context_menu_request
+**
+***---------------------------------------------------------------------*
+***       METHOD top_of_page                                            *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method top_of_page.
+**    perform d0100_event_top_of_page using e_dyndoc_id.
+**  endmethod.                    "top_of_page
+**
+***---------------------------------------------------------------------*
+***       METHOD end_of_list                                            *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method end_of_list.
+**    perform d0100_event_end_of_list using e_dyndoc_id.
+**  endmethod.                    "end_of_list
+**
+***---------------------------------------------------------------------*
+***       METHOD print_top_of_page                                      *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method print_top_of_page.
+**    perform d0100_event_print_top_of_page.
+**  endmethod.                    "print_top_of_page
+**
+***---------------------------------------------------------------------*
+***       METHOD print_end_of_page                                      *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method print_end_of_page.
+**    perform d0100_event_print_end_of_page.
+**  endmethod.                    "print_end_of_page
+**
+***---------------------------------------------------------------------*
+***       METHOD print_top_of_list                                      *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method print_top_of_list.
+**    perform d0100_event_print_top_of_list.
+**  endmethod.                    "print_top_of_list
+**
+***---------------------------------------------------------------------*
+***       METHOD print_end_of_list                                      *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method print_end_of_list.
+**    perform d0100_event_print_end_of_list.
+**  endmethod.                    "print_end_of_list
+**
+**---------------------------------------------------------------------*
+**       METHOD after_refresh                                          *
+**---------------------------------------------------------------------*
+**       ........                                                      *
+**---------------------------------------------------------------------*
+*  METHOD after_refresh.
+**    PERFORM d0100_event_after_refresh.
+*  ENDMETHOD.                    "after_refresh
+*
+***---------------------------------------------------------------------*
+***       METHOD delayed_callback                                       *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method delayed_callback.
+**    perform d0100_event_delayed_callback.
+**  endmethod.                    "delayed_callback
+**
+***---------------------------------------------------------------------*
+***       METHOD delayed_changed_sel_callback                           *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method delayed_changed_sel_callback.
+**    perform d0100_event_changed_sel_callba.
+**  endmethod.                    "delayed_changed_sel_callback
+**
+***---------------------------------------------------------------------*
+***       METHOD subtotal_text                                          *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method subtotal_text.
+**    perform d0100_event_subtotal_text using es_subtottxt_info
+**                                            ep_subtot_line
+**                                            e_event_data.
+**  endmethod.                    "subtotal_text
+**
+***---------------------------------------------------------------------*
+***       METHOD ondrag                                                 *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method ondrag.
+**    perform d0100_event_ondrag using e_row
+**                                     e_column
+**                                     e_dragdropobj.
+**  endmethod.                    "ondrag
+**
+***---------------------------------------------------------------------*
+***       METHOD ondrop                                                 *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method ondrop.
+**    perform d0100_event_ondrop using e_row
+**                                     e_column
+**                                     e_dragdropobj.
+**  endmethod.                    "ondrop
+**
+***---------------------------------------------------------------------*
+***       METHOD ondropcomplete                                         *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method ondropcomplete.
+**    perform d0100_event_ondropcomplete using e_row
+**                                             e_column
+**                                             e_dragdropobj.
+**  endmethod.                    "ondropcomplete
+**
+***---------------------------------------------------------------------*
+***       METHOD ondropgetflavor                                        *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method ondropgetflavor.
+**    perform d0100_event_ondropgetflavor.
+**  endmethod.                    "ondropgetflavor
+**
+***---------------------------------------------------------------------*
+***       METHOD data_changed                                           *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+*  METHOD data_changed.
+*    PERFORM d0100_event_data_changed USING er_data_changed
+*                                           e_onf4
+*                                           e_onf4_before
+*                                           e_onf4_after.
+*  ENDMETHOD.                    "data_changed
+**
+***---------------------------------------------------------------------*
+***       METHOD data_changed_finished                                  *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method data_changed_finished.
+**    perform d0100_event_data_changed_finis.
+**  endmethod.                    "data_changed_finished
+**
+***---------------------------------------------------------------------*
+***       METHOD button_click                                           *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method button_click.
+**    perform d0100_event_button_click using es_col_id
+**                                           es_row_no.
+**  endmethod.                    "button_click
+**
+***---------------------------------------------------------------------*
+***       METHOD onf1                                                   *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method onf1.
+**    perform d0100_event_onf1 using e_fieldname
+**                                   es_row_no
+**                                   er_event_data.
+**  endmethod.                                                "onf1
+**
+***---------------------------------------------------------------------*
+***       METHOD onf4                                                   *
+***---------------------------------------------------------------------*
+***       ........                                                      *
+***---------------------------------------------------------------------*
+**  method onf4.
+**    perform d0100_event_onf4 using e_fieldname
+**                                   e_fieldvalue
+**                                   es_row_no
+**                                   er_event_data
+**                                   et_bad_cells
+**                                   e_display.
+**  endmethod.                                                "onf4
+*ENDCLASS.                    "lcl_events_d0100 IMPLEMENTATION
+
+*---------------------------------------------------------------------*
+*       MAIN                                                          *
+*---------------------------------------------------------------------*
+END-OF-SELECTION.
+  CALL SCREEN 100.
+
+*---------------------------------------------------------------------*
+*       MODULE PBO OUTPUT                                             *
+*---------------------------------------------------------------------*
+MODULE pbo OUTPUT.
+  SET PF-STATUS 'MAIN100'.
+  IF p_test IS INITIAL.
+    SET TITLEBAR 'MAIN100'.
+  ELSE.
+    SET TITLEBAR 'MAIN100_TEST'.
+  ENDIF.
+  IF sy-tcode = 'ZPERSON_MAINTAIN_MI'.
+    g_manual_input  = abap_true.
+  ENDIF.
+
+
+  IF g_custom_container IS INITIAL.
+    PERFORM create_and_init_alv CHANGING gt_alv_table[]
+                                         gt_fieldcat.
+  ENDIF.
+
+
+ENDMODULE.                    "pbo OUTPUT
+*---------------------------------------------------------------------*
+*       MODULE PAI INPUT                                              *
+*---------------------------------------------------------------------*
+MODULE pai INPUT.
+  save_ok = ok_code.
+  CLEAR ok_code.
+  CASE save_ok.
+    WHEN 'CANCEl' OR 'EXIT'.
+      PERFORM exit_program.
+    WHEN 'SWITCH'.
+      PERFORM switch_edit_mode.
+    WHEN 'BACK'.
+      PERFORM free_objects.
+      SET SCREEN '0'.
+      LEAVE SCREEN.
+    WHEN OTHERS.
+      DATA: lt_selected_rows TYPE lvc_t_row. "Selected Rows
+      CALL METHOD gr_grid_d0100->get_selected_rows
+        IMPORTING
+          et_index_rows = lt_selected_rows.
+
+      gr_grid_d0100->check_changed_data( ).
+
+      IF save_ok = 'SARE'.
+        PERFORM post_data.
+      ENDIF.
+
+      CALL METHOD gr_grid_d0100->refresh_table_display.
+
+  ENDCASE.
+ENDMODULE.                    "pai INPUT
+*---------------------------------------------------------------------*
+*       FORM EXIT_PROGRAM                                             *
+*---------------------------------------------------------------------*
+FORM exit_program.
+  PERFORM free_objects.
+  LEAVE PROGRAM.
+ENDFORM.                    "exit_program
+
+FORM free_objects.
+  CALL METHOD gr_grid_d0100->free
+    EXCEPTIONS
+      cntl_error        = 1
+      cntl_system_error = 2
+      OTHERS            = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+               WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+*  CALL METHOD O_DOCKING->FREE
+*    EXCEPTIONS
+*      CNTL_ERROR        = 1
+*      CNTL_SYSTEM_ERROR = 2
+*      OTHERS            = 3.
+*  IF SY-SUBRC <> 0.
+*    MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*               WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+*  ENDIF.
+ENDFORM.                    " free_objects
+*&---------------------------------------------------------------------*
+*&      Form  BUILD_FIELDCAT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      <--P_GT_FIELDCAT  text
+*----------------------------------------------------------------------*
+FORM build_fieldcat CHANGING lt_fieldcat TYPE lvc_t_fcat.
+
+  DATA: lv_col_pos TYPE i.
+
+  REFRESH: lt_fieldcat.
+  lv_col_pos  =  1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_light>).
+  <ls_fieldcat_light>-reptext = 'Status'.
+  <ls_fieldcat_light>-fieldname = 'LIGHT'.
+  <ls_fieldcat_light>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_light>-outputlen = '4'.
+  <ls_fieldcat_light>-icon = 'X'.
+  <ls_fieldcat_light>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_aa>).
+  <ls_fieldcat_aa>-reptext = 'ACTION'.
+  <ls_fieldcat_aa>-fieldname = 'ACTION'.
+  <ls_fieldcat_aa>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_aa>-outputlen = '20'.
+  <ls_fieldcat_aa>-edit = g_edit.
+  <ls_fieldcat_aa>-drdn_hndl = '1'.
+  <ls_fieldcat_aa>-checktable = '!'.
+  <ls_fieldcat_aa>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_msg>).
+  <ls_fieldcat_msg>-reptext = 'Message'.
+  <ls_fieldcat_msg>-fieldname = 'MESSAGE'.
+  <ls_fieldcat_msg>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_msg>-outputlen = '20'.
+  <ls_fieldcat_msg>-edit = abap_false.
+  <ls_fieldcat_msg>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_pernr>).
+  <ls_fieldcat_pernr>-reptext = 'Personnal No'.
+  <ls_fieldcat_pernr>-fieldname = 'PERNR'.
+  <ls_fieldcat_pernr>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_pernr>-outputlen = '10'.
+  <ls_fieldcat_pernr>-key = abap_true.
+  <ls_fieldcat_pernr>-edit = abap_false.
+  <ls_fieldcat_pernr>-col_pos = lv_col_pos.
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_cacid>).
+  <ls_fieldcat_cacid>-reptext = 'CAC ID'.
+  <ls_fieldcat_cacid>-fieldname = 'CACID'.
+  <ls_fieldcat_cacid>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_cacid>-outputlen = '10'.
+  <ls_fieldcat_cacid>-key = abap_false.
+  <ls_fieldcat_cacid>-edit = g_edit.
+  <ls_fieldcat_cacid>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_ssn>).
+  <ls_fieldcat_ssn>-reptext = 'SSN'.
+  <ls_fieldcat_ssn>-fieldname = 'PERID'.
+  <ls_fieldcat_ssn>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_ssn>-outputlen = '10'.
+  <ls_fieldcat_ssn>-key = abap_true.
+  <ls_fieldcat_ssn>-edit = g_edit.
+  <ls_fieldcat_ssn>-col_pos = lv_col_pos.
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_last>).
+  <ls_fieldcat_last>-reptext = 'Last_Name'.
+  <ls_fieldcat_last>-fieldname = 'NACHN'.
+  <ls_fieldcat_last>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_last>-outputlen = '20'.
+  <ls_fieldcat_last>-key = abap_false.
+  <ls_fieldcat_last>-edit = abap_true.
+  <ls_fieldcat_last>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_auid>).
+  <ls_fieldcat_auid>-reptext = 'AU ID'.
+  <ls_fieldcat_auid>-fieldname = 'AUID'.
+  <ls_fieldcat_auid>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_auid>-outputlen = '10'.
+  <ls_fieldcat_auid>-key = abap_false.
+  <ls_fieldcat_auid>-edit = g_edit.
+  <ls_fieldcat_auid>-col_pos = lv_col_pos.
+
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_fn>).
+  <ls_fieldcat_fn>-reptext = 'First Name'.
+  <ls_fieldcat_fn>-fieldname = 'VORNA'.
+  <ls_fieldcat_fn>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_fn>-outputlen = '20'.
+  <ls_fieldcat_fn>-key = abap_false.
+  <ls_fieldcat_fn>-edit = g_manual_input.
+  <ls_fieldcat_fn>-col_pos = lv_col_pos.
+
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_dob>).
+  <ls_fieldcat_dob>-reptext = 'Date Of Birth'.
+*  <ls_fieldcat_dob>-coltext = 'Dt Of Birth'.
+*  <ls_fieldcat_dob>-scrtext_l = 'Dt Of Birth'.
+*  <ls_fieldcat_dob>-scrtext_m = 'Dt Of Birth'.
+*  <ls_fieldcat_dob>-scrtext_s = 'Dt Of Birth'.
+  <ls_fieldcat_dob>-fieldname = 'GBDAT'.
+  <ls_fieldcat_dob>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_dob>-outputlen = '15'.
+  <ls_fieldcat_dob>-key = abap_false.
+  <ls_fieldcat_dob>-f4availabl = 'X'.
+  <ls_fieldcat_dob>-ref_table = 'P0002'.
+  <ls_fieldcat_dob>-ref_field = 'GBDAT'.
+  <ls_fieldcat_dob>-edit = g_manual_input.
+  <ls_fieldcat_dob>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_posid>).
+  <ls_fieldcat_posid>-reptext = 'Position ID'.
+  <ls_fieldcat_posid>-fieldname = 'PLANS'.
+  <ls_fieldcat_posid>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_posid>-ref_table = 'PA0001'.
+*  <LS_FIELDCAT_POSID>-REF_FIELDNAME = 'PLANS'.
+  <ls_fieldcat_posid>-outputlen = '10'.
+  <ls_fieldcat_posid>-f4availabl = abap_true.
+  <ls_fieldcat_posid>-edit = g_edit.
+*  <LS_FIELDCAT_POSID>-DATATYPE = 'PLANS'.
+  <ls_fieldcat_posid>-col_pos = lv_col_pos.
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_possa>).
+  <ls_fieldcat_possa>-reptext = 'Position Abbr'.
+  <ls_fieldcat_possa>-fieldname = 'SHORT'.
+  <ls_fieldcat_possa>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_possa>-outputlen = '12'.
+*  <ls_fieldcat_possa>-f4availabl = abap_true.
+  <ls_fieldcat_possa>-edit = g_edit.
+  <ls_fieldcat_possa>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_spr>).
+  <ls_fieldcat_spr>-reptext = 'Service Rank Paygrade'.
+  <ls_fieldcat_spr>-fieldname = 'ANSVH'.
+  <ls_fieldcat_spr>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_spr>-outputlen = '10'.
+*  <ls_fieldcat_spr>-ref_table = 'PA0001'.
+  <ls_fieldcat_spr>-f4availabl = abap_true.
+*HRPAD_ANSVH
+  <ls_fieldcat_spr>-edit = g_edit.
+  <ls_fieldcat_spr>-col_pos = lv_col_pos.
+
+
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_edt>).
+  <ls_fieldcat_edt>-reptext = 'Effective Date'.
+  <ls_fieldcat_edt>-fieldname = 'BEGDA'.
+  <ls_fieldcat_edt>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_edt>-outputlen = '15'.
+  <ls_fieldcat_edt>-key = abap_false.
+  <ls_fieldcat_edt>-edit = g_edit.
+  <ls_fieldcat_edt>-f4availabl = 'X'.
+  <ls_fieldcat_edt>-ref_table = 'SYST'.
+  <ls_fieldcat_edt>-ref_field = 'DATUM'.
+  <ls_fieldcat_edt>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_email>).
+  <ls_fieldcat_email>-reptext = 'Email'.
+  <ls_fieldcat_email>-fieldname = 'EMAIL'.
+  <ls_fieldcat_email>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_email>-outputlen = '50'.
+  <ls_fieldcat_email>-dd_outlen = '240'.
+  <ls_fieldcat_email>-key = abap_false.
+  <ls_fieldcat_email>-edit = g_edit.
+  <ls_fieldcat_email>-col_pos = lv_col_pos.
+
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_strt>).
+  <ls_fieldcat_strt>-reptext = 'Street and house no'.
+  <ls_fieldcat_strt>-fieldname = 'STRAS'.
+  <ls_fieldcat_strt>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_strt>-outputlen = '20'.
+  <ls_fieldcat_strt>-key = abap_false.
+  <ls_fieldcat_strt>-edit = abap_false.
+  <ls_fieldcat_strt>-col_pos = lv_col_pos.
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_cty>).
+  <ls_fieldcat_cty>-reptext = 'City'.
+  <ls_fieldcat_cty>-fieldname = 'ORT01'.
+  <ls_fieldcat_cty>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_cty>-outputlen = '10'.
+  <ls_fieldcat_cty>-edit = abap_false.
+  <ls_fieldcat_cty>-key = abap_false.
+  <ls_fieldcat_cty>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_stt>).
+  <ls_fieldcat_stt>-reptext = 'State'.
+  <ls_fieldcat_stt>-fieldname = 'STATE'.
+  <ls_fieldcat_stt>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_stt>-outputlen = '10'.
+*  <ls_fieldcat_stt>-ref_table = 'T005S'.
+*  <ls_fieldcat_stt>-ref_field = 'REGIO'.
+*  <ls_fieldcat_stt>-f4availabl = abap_true.
+  <ls_fieldcat_stt>-key = abap_false.
+  <ls_fieldcat_stt>-edit = abap_false.
+  <ls_fieldcat_stt>-col_pos = lv_col_pos.
+
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_pocd>).
+  <ls_fieldcat_pocd>-reptext = 'Postal Code'.
+  <ls_fieldcat_pocd>-fieldname = 'PSTLZ'.
+  <ls_fieldcat_pocd>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_pocd>-outputlen = '10'.
+  <ls_fieldcat_pocd>-edit = abap_false.
+  <ls_fieldcat_pocd>-key = abap_false.
+  <ls_fieldcat_pocd>-col_pos = lv_col_pos.
+
+
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_ctry>).
+*  <ls_fieldcat_ctry>-reptext = 'Country'.
+*  <ls_fieldcat_ctry>-fieldname = 'LAND1'.
+*  <ls_fieldcat_ctry>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_ctry>-outputlen = '10'.
+*  <ls_fieldcat_ctry>-key = abap_false.
+*  <ls_fieldcat_ctry>-edit = abap_false.
+*  <ls_fieldcat_ctry>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_strt2>).
+  <ls_fieldcat_strt2>-reptext = 'Street and House No2'.
+  <ls_fieldcat_strt2>-fieldname = 'STRAS2'.
+  <ls_fieldcat_strt2>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_strt2>-outputlen = '20'.
+  <ls_fieldcat_strt2>-key = abap_false.
+  <ls_fieldcat_strt2>-edit = abap_false.
+  <ls_fieldcat_strt2>-col_pos = lv_col_pos.
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_cty2>).
+  <ls_fieldcat_cty2>-reptext = 'City2'.
+  <ls_fieldcat_cty2>-fieldname = 'ORT012'.
+  <ls_fieldcat_cty2>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_cty2>-outputlen = '10'.
+  <ls_fieldcat_cty2>-key = abap_false.
+  <ls_fieldcat_cty2>-edit = abap_false.
+  <ls_fieldcat_cty2>-col_pos = lv_col_pos.
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_stt2>).
+  <ls_fieldcat_stt2>-reptext = 'State2'.
+  <ls_fieldcat_stt2>-fieldname = 'STATE2'.
+  <ls_fieldcat_stt2>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_stt2>-outputlen = '10'.
+  <ls_fieldcat_stt2>-key = abap_false.
+  <ls_fieldcat_stt2>-edit = abap_false.
+  <ls_fieldcat_stt2>-col_pos = lv_col_pos.
+
+
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_pocd2>).
+  <ls_fieldcat_pocd2>-reptext = 'Postal Code2'.
+  <ls_fieldcat_pocd2>-fieldname = 'PSTLZ2'.
+  <ls_fieldcat_pocd2>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_pocd2>-outputlen = '10'.
+  <ls_fieldcat_pocd2>-key = abap_false.
+  <ls_fieldcat_pocd2>-edit = abap_false.
+  <ls_fieldcat_pocd2>-col_pos = lv_col_pos.
+
+
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_ctry2>).
+*  <ls_fieldcat_ctry2>-reptext = 'Country2'.
+*  <ls_fieldcat_ctry2>-fieldname = 'LAND12'.
+*  <ls_fieldcat_ctry2>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_ctry2>-outputlen = '10'.
+*  <ls_fieldcat_ctry2>-key = abap_false.
+*  <ls_fieldcat_ctry2>-edit = abap_false.
+*  <ls_fieldcat_ctry2>-col_pos = lv_col_pos.
+
+
+*--- Message --------
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_type>).
+  <ls_fieldcat_type>-reptext = 'Type'.
+  <ls_fieldcat_type>-fieldname = 'TYPE'.
+  <ls_fieldcat_type>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_type>-outputlen = '4'.
+  <ls_fieldcat_type>-edit = abap_false.
+  <ls_fieldcat_type>-col_pos = lv_col_pos.
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_mid>).
+  <ls_fieldcat_mid>-reptext = 'Message Id'.
+  <ls_fieldcat_mid>-fieldname = 'ID'.
+  <ls_fieldcat_mid>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_mid>-outputlen = '10'.
+  <ls_fieldcat_mid>-edit = abap_false.
+  <ls_fieldcat_mid>-col_pos = lv_col_pos.
+
+  lv_col_pos = lv_col_pos + 1.
+  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_no>).
+  <ls_fieldcat_no>-reptext = 'Number'.
+  <ls_fieldcat_no>-fieldname = 'NUMBER'.
+  <ls_fieldcat_no>-tabname = 'GT_ALV_TABLE'.
+  <ls_fieldcat_no>-outputlen = '6'.
+  <ls_fieldcat_no>-edit = abap_false.
+  <ls_fieldcat_no>-col_pos = lv_col_pos.
+
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_msg>).
+*  <ls_fieldcat_msg>-reptext = 'Message'.
+*  <ls_fieldcat_msg>-fieldname = 'MESSAGE'.
+*  <ls_fieldcat_msg>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_msg>-outputlen = '220'.
+*  <ls_fieldcat_msg>-edit = abap_false.
+*  <ls_fieldcat_msg>-col_pos = lv_col_pos.
+
+
+
+*  LV_COL_POS = LV_COL_POS + 1.
+*  APPEND INITIAL LINE TO LT_FIELDCAT ASSIGNING FIELD-SYMBOL(<LS_FIELDCAT_RSN>).
+*  <LS_FIELDCAT_RSN>-REPTEXT = 'REASON'.
+*  <LS_FIELDCAT_RSN>-FIELDNAME = 'MASSG'.
+*  <LS_FIELDCAT_RSN>-TABNAME = 'GT_ALV_TABLE'.
+*  <LS_FIELDCAT_RSN>-OUTPUTLEN = '10'.
+*  <LS_FIELDCAT_RSN>-KEY = ABAP_FALSE.
+*  <LS_FIELDCAT_RSN>-COL_POS = LV_COL_POS.
+*
+
+
+
+
+*  LOOP AT PT_FIELDCAT INTO LS_FCAT.
+** Exchange smoker field with invoice field - just to
+** make the dependance between SMOKER and CLASS more transparent
+** (Smoking is only allowed in the first class).
+*    IF LS_FCAT-FIELDNAME EQ 'SMOKER'.
+*      LS_FCAT-COL_POS = 11.
+*      LS_FCAT-OUTPUTLEN = 10.
+*      LS_FCAT-EDIT = 'X'.
+** Field 'checktable' is set to avoid shortdumps that are caused
+** by inconsistend data in check tables. You may comment this out
+** when the test data of the flight model is consistent in your system.
+*      LS_FCAT-CHECKTABLE = '!'.        "do not check foreign keys
+*
+*      MODIFY PT_FIELDCAT FROM LS_FCAT.
+*
+*    ELSEIF LS_FCAT-FIELDNAME EQ 'INVOICE'.
+*      LS_FCAT-COL_POS = 7.
+*      MODIFY PT_FIELDCAT FROM LS_FCAT.
+*
+*    ELSEIF    LS_FCAT-FIELDNAME EQ 'CLASS'.
+*
+*      LS_FCAT-EDIT = 'X'.
+*      LS_FCAT-OUTPUTLEN = 5.
+*      LS_FCAT-CHECKTABLE = '!'.        "do not check foreign keys
+*
+*      MODIFY PT_FIELDCAT FROM LS_FCAT.
+*    ENDIF.
+*  ENDLOOP.
+
+ENDFORM.                    "build_fieldcat
+*&---------------------------------------------------------------------*
+*&      Form  CREATE_AND_INIT_ALV
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      <--P_GT_OUTTAB  text
+*      <--P_GT_FIELDCAT  text
+*      <--P_GS_LAYOUT  text
+*----------------------------------------------------------------------*
+FORM create_and_init_alv CHANGING pt_outtab TYPE STANDARD TABLE
+                                  pt_fieldcat TYPE lvc_t_fcat.
+
+  DATA: lt_exclude TYPE ui_functions.
+  DATA: ls_layout   TYPE lvc_s_layo.
+
+
+  ls_layout-ctab_fname = 'TCOLOR'.
+  ls_layout-info_fname = 'COLOR_LINE'.
+  ls_layout-zebra = abap_true.
+*  ls_layout-cwidth_opt = abap_true.
+  ls_layout-excp_fname = 'LIGHT'.
+*§ Provide the fieldname of the celltab field by using field
+*   STYLEFNAME of the layout structure.
+  ls_layout-stylefname = 'CELLTAB'.
+
+
+
+  CREATE OBJECT g_custom_container
+    EXPORTING
+      container_name = g_container.
+  CREATE OBJECT gr_grid_d0100
+    EXPORTING
+      i_parent = g_custom_container.
+
+  PERFORM set_drdn_table.
+
+
+  PERFORM build_fieldcat CHANGING pt_fieldcat.
+*  PERFORM BUILD_FIELD_CATALOG CHANGING PT_FIELDCAT.
+
+* Optionally restrict generic functions to 'change only'.
+*   (The user shall not be able to add new lines).
+  PERFORM exclude_tb_functions CHANGING lt_exclude.
+
+*  perform build_data changing pt_outtab.
+
+  CALL METHOD gr_grid_d0100->set_table_for_first_display
+    EXPORTING
+      it_toolbar_excluding = lt_exclude
+      is_layout            = ls_layout
+    CHANGING
+      it_fieldcatalog      = pt_fieldcat
+      it_outtab            = pt_outtab[].
+
+* register f4 for field CLASS
+  PERFORM register_events.
+*  PERFORM d0100_set_grid_events.
+
+
+  CALL METHOD gr_grid_d0100->register_edit_event
+    EXPORTING
+      i_event_id = cl_gui_alv_grid=>mc_evt_modified.
+
+** Spaltendefinitionen:
+*  perform set_columns_om.
+
+* Set editable cells to ready for input initially
+  gr_grid_d0100->set_ready_for_input( i_ready_for_input = 1 ).
+ENDFORM.                               "CREATE_AND_INIT_ALV
+
+*FORM SET_COLUMNS_OM .
+*
+*  data: cols type ref to cl_salv_columns_list,
+*        col  type ref to cl_salv_column_list.
+*
+*  cols = Gr_grid_d0100->get_columns( ).
+*
+*  try.
+*      cols->set_exception_column( 'LIGHTS' ).
+*      cols->set_color_column( 'TABCOL' ).
+*    catch cx_salv_data_error.                           "#EC NO_HANDLER
+*  endtry.
+*
+*  try.
+*      col ?= cols->get_column( columnname = 'LIGHTS' ).
+*      col->set_short_text( 'SHORT TEXT' ).
+*      col->set_medium_text( 'MEDIUM TEXT' ).
+*      col->set_long_text( 'LONG TEXT' ).
+*      col->set_tooltip( 'TOOLTIP TEXT' ).
+*    catch cx_salv_not_found.                            "#EC NO_HANDLER
+*  endtry.
+*
+*  try.
+*      col ?= cols->get_column( columnname = 'NAME' ).
+*      col->set_technical( abap_true ).
+*    catch cx_salv_not_found.                            "#EC NO_HANDLER
+*  endtry.
+*
+*  try.
+*      col ?= cols->get_column( columnname = 'ID' ).
+*      col->set_long_text( text-hl1 ).
+*      col->set_tooltip( text-ht1 ).
+*      col->set_icon( abap_true ).
+*    catch cx_salv_not_found.                            "#EC NO_HANDLER
+*  endtry.
+*
+*  try.
+*      col ?= cols->get_column( columnname = 'SYMBOL' ).
+*      col->set_long_text( text-hl2 ).
+*      col->set_tooltip( text-ht2 ).
+*      col->set_symbol( abap_true ).
+*
+**Farbe auf Spalteneben
+*data: color TYPE LVC_S_COLO.
+*      color-col = '6'.
+*      color-int = '0'.
+*      color-inv = '0'.
+*      col->set_color( color ).   "Spalte Symbol wird rot
+*    catch cx_salv_not_found.                            "#EC NO_HANDLER
+*  endtry.
+*
+*  try.
+*      col ?= cols->get_column( columnname = 'COLOR' ).
+*      col->set_long_text( text-hl3 ).
+*      col->set_tooltip( text-ht3 ).
+*    catch cx_salv_not_found.                            "#EC NO_HANDLER
+*  endtry.
+*
+*ENDFORM.                    " SET_COLUMNS_OM
+
+
+*&---------------------------------------------------------------------*
+*&      Form  EXCLUDE_TB_FUNCTIONS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      <--P_LT_EXCLUDE  text
+*----------------------------------------------------------------------*
+FORM exclude_tb_functions CHANGING pt_exclude TYPE ui_functions.
+* Only allow to change data not to create new entries (exclude
+* generic functions).
+
+  DATA ls_exclude TYPE ui_func.
+
+  ls_exclude = cl_gui_alv_grid=>mc_fc_maximum.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_minimum.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_subtot.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_sum.
+  APPEND ls_exclude TO pt_exclude.
+
+  ls_exclude = cl_gui_alv_grid=>mc_fc_average.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_print.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_views.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_expcrdata.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_subtot.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_mb_export.
+  APPEND ls_exclude TO pt_exclude.
+
+
+  ls_exclude = cl_gui_alv_grid=>mc_fc_loc_copy_row.
+  APPEND ls_exclude TO pt_exclude.
+*  LS_EXCLUDE = CL_GUI_ALV_GRID=>MC_FC_LOC_DELETE_ROW.
+*  APPEND LS_EXCLUDE TO PT_EXCLUDE.
+*  LS_EXCLUDE = CL_GUI_ALV_GRID=>MC_FC_LOC_APPEND_ROW.
+*  APPEND LS_EXCLUDE TO PT_EXCLUDE.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_loc_insert_row.
+  APPEND ls_exclude TO pt_exclude.
+  ls_exclude = cl_gui_alv_grid=>mc_fc_loc_move_row.
+  APPEND ls_exclude TO pt_exclude.
+
+ENDFORM.                               " EXCLUDE_TB_FUNCTIONS
+*&---------------------------------------------------------------------*
+*&      Form  build_data
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM build_data CHANGING pt_outtab TYPE STANDARD TABLE.
+  DATA: ls_sbook TYPE sbook,
+        l_index  TYPE i.
+
+  SELECT * FROM sbook INTO TABLE gt_outtab UP TO g_max ROWS
+                                   ORDER BY PRIMARY KEY. "#EC CI_NOWHERE
+  IF sy-subrc NE 0.
+    PERFORM generate_entries CHANGING pt_outtab.
+  ENDIF.
+
+  LOOP AT pt_outtab INTO ls_sbook.
+    l_index = sy-tabix.
+    CLEAR ls_sbook-class.
+* Alternate between smoker and non smoker to make
+* it more obvious what this example is about
+    l_index = l_index MOD 2.
+    IF l_index EQ 1.
+      ls_sbook-smoker = 'X'.
+    ELSE.
+      ls_sbook-smoker = ' '.
+    ENDIF.
+    MODIFY pt_outtab FROM ls_sbook.
+  ENDLOOP.
+
+ENDFORM.                               " build_data
+
+*&---------------------------------------------------------------------*
+*&      Form  generate_entries
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      <--P_LT_SLFIGHT  text
+*----------------------------------------------------------------------*
+FORM generate_entries CHANGING pt_sbook TYPE STANDARD TABLE.
+  DATA: ls_sbook    TYPE sbook,
+        l_month(2)  TYPE c,
+        l_day(2)    TYPE c,
+        l_date(8)   TYPE c,
+        l_prebookid TYPE i.
+
+
+  ls_sbook-carrid = 'LH'.
+  ls_sbook-connid = '0400'.
+  ls_sbook-forcurkey = 'DEM'.
+  ls_sbook-loccurkey = 'USD'.
+  ls_sbook-custtype = 'B'.
+
+  DO 110 TIMES.
+    l_prebookid = sy-index.
+
+    ls_sbook-forcuram = sy-index * 10.
+    ls_sbook-loccuram = ls_sbook-loccuram * 2.
+    ls_sbook-customid = sy-index.
+    ls_sbook-counter = 18.
+    ls_sbook-agencynum = 11.
+
+    l_month = sy-index / 10 + 1.
+    DO 2 TIMES.
+      l_day = 3 + l_month + sy-index * 2.
+      l_date+0(4) = '2000'.
+      l_date+4(2) = l_month.
+      l_date+6(2) = l_day.
+      ls_sbook-fldate = l_date.
+      SUBTRACT 3 FROM l_day.
+      ls_sbook-order_date+0(6) = l_date+0(6).
+      ls_sbook-order_date+6(2) = l_day.
+      ls_sbook-bookid = l_prebookid * 2 + sy-index.
+      IF sy-index EQ 1.
+        ls_sbook-smoker = 'X'.
+      ELSE.
+        ls_sbook-smoker = space.
+      ENDIF.
+
+      ls_sbook-luggweight = l_prebookid * 10.
+      IF ls_sbook-luggweight GE 1000.
+        ls_sbook-wunit = 'G'.
+        ls_sbook-class = 'C'.
+      ELSE.
+        ls_sbook-wunit = 'KG'.
+        ls_sbook-class = 'Y'.
+      ENDIF.
+
+      IF ls_sbook-bookid > 40 AND ls_sbook-wunit EQ 'KG'.
+        ls_sbook-invoice = 'X'.
+      ENDIF.
+      IF ls_sbook-bookid EQ 2.
+        ls_sbook-cancelled = 'X'.
+        ls_sbook-class = 'F'.
+      ENDIF.
+
+      APPEND ls_sbook TO pt_sbook.
+    ENDDO.
+  ENDDO.
+ENDFORM.                               " generate_entries
+*&---------------------------------------------------------------------*
+*&      Form  register_events
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM register_events.
+*§1. Register event ONF4 at frontend using method
+*    register_f4_for_fields. For this purpose, you pass a table
+*    with all fields, for which you want to implement your own
+*    f4 help.
+
+* remark: If you want to use an own f4 help for fields where
+*         no standard f4 help exists set field F4AVAILABL for
+*         this field in the fieldcatalog.
+  DATA: lt_f4 TYPE lvc_t_f4 WITH HEADER LINE.
+
+  CLEAR lt_f4.
+  lt_f4-fieldname = 'PLANS'.
+* If you would like to deregister the field again,
+* pass value SPACE with field 'register'.
+  lt_f4-register = 'X'.
+*§  1b. If the value range in your f4 help depends on other
+*       values of cells that are input enabled, set the
+*       GETBEFORE parameter.
+* The consequence is that the ALV Grid Control raises
+* event DATA_CHANGED before the f4 help is called to
+* check values that the f4 help depends on.
+  lt_f4-getbefore = 'X'.
+* The next parameter is used to change values after onf4 has
+* been processed. The ALV Grid Control will raise
+* event DATA_CHANGED afterwards, if you set it.
+  lt_f4-chngeafter = space.
+  INSERT TABLE lt_f4.
+
+
+  CLEAR lt_f4.
+  lt_f4-fieldname = 'ANSVH'.
+  lt_f4-register = 'X'.
+  lt_f4-getbefore = 'X'.
+  lt_f4-chngeafter = space.
+  INSERT TABLE lt_f4.
+
+
+  CLEAR lt_f4.
+  lt_f4-fieldname = 'ACTION'.
+  lt_f4-register = 'X'.
+  lt_f4-getbefore = 'X'.
+  lt_f4-chngeafter = 'X'.
+  INSERT TABLE lt_f4.
+
+
+
+  CALL METHOD gr_grid_d0100->register_f4_for_fields
+    EXPORTING
+      it_f4 = lt_f4[].
+
+* register events for abap objects (backend)
+  CREATE OBJECT g_onf4.
+  SET HANDLER g_onf4->on_f4 FOR gr_grid_d0100.
+
+  CREATE OBJECT g_dc.
+  SET HANDLER g_dc->handle_data_changed FOR gr_grid_d0100.
+
+ENDFORM.                    " register_events
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_0101  OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE status_0101 OUTPUT.
+  SET PF-STATUS 'POPUP'.
+  SET TITLEBAR 'POPUP'.
+  CALL METHOD g_onf4->show_f4.
+ENDMODULE.                 " STATUS_0101  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_0101  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE user_command_0101 INPUT.
+  PERFORM user_command_0101.
+ENDMODULE.                 " USER_COMMAND_0101  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  user_command
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM user_command_0101.
+
+  DATA: save_ok TYPE sy-ucomm.
+
+  save_ok = ok_code.
+  CLEAR ok_code.
+  CASE save_ok.
+    WHEN 'CANCEL'.
+      CALL METHOD g_onf4->reset.
+      LEAVE SCREEN.
+  ENDCASE.
+
+ENDFORM.                    " user_command
+*-------------------------------------------------------------------
+FORM switch_edit_mode.
+
+  IF gr_grid_d0100->is_ready_for_input( ) EQ 0.
+* set edit enabled cells ready for input
+    CALL METHOD gr_grid_d0100->set_ready_for_input
+      EXPORTING
+        i_ready_for_input = 1.
+
+  ELSE.
+* lock edit enabled cells against input
+    CALL METHOD gr_grid_d0100->set_ready_for_input
+      EXPORTING
+        i_ready_for_input = 0.
+  ENDIF.
+ENDFORM.                               " SWITCH_EDIT_MODE
+
+
+*&---------------------------------------------------------------------*
+*&      Form  d0100_event_after_refresh
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM d0100_event_after_refresh .                            "#EC CALLED
+
+  DATA: l_event TYPE lvc_fname.                             "#EC NEEDED
+
+*  if gs_test-info_popup_once eq con_true.
+*    read table gs_test-events_info_popup into l_event
+*               with key table_line = 'AFTER_REFRESH'.
+*    if sy-subrc ne 0.
+*      insert 'AFTER_REFRESH' into gs_test-events_info_popup index 1.
+*      message i000(0k) with text-017.
+*    endif.
+*  elseif gs_test-no_info_popup eq space.
+*    message i000(0k) with text-017.
+*  endif.
+
+  LOOP AT gt_alv_table ASSIGNING FIELD-SYMBOL(<ls_alv_check>).
+    <ls_alv_check>-light  = '1'.
+  ENDLOOP.
+
+  CALL METHOD gr_grid_d0100->refresh_table_display.
+
+
+  PERFORM d0100_get_grid_infos.
+
+ENDFORM.                    " d0100_event_after_refresh
+
+*&---------------------------------------------------------------------*
+*&      Form  d0100_get_grid_infos
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM d0100_get_grid_infos .
+
+  DATA: lt_filtered_entries TYPE lvc_t_fidx.                "#EC NEEDED
+
+  gr_grid_d0100->get_filtered_entries(
+    IMPORTING et_filtered_entries = lt_filtered_entries ).
+
+  DATA: lt_filter TYPE lvc_t_filt.                          "#EC NEEDED
+
+  gr_grid_d0100->get_filter_criteria(
+    IMPORTING et_filter = lt_filter ).
+
+  DATA: lt_fcat TYPE lvc_t_fcat.                            "#EC NEEDED
+
+  gr_grid_d0100->get_frontend_fieldcatalog(
+    IMPORTING et_fieldcatalog = lt_fcat ).
+
+  DATA: lt_sort TYPE lvc_t_sort.                            "#EC NEEDED
+
+  gr_grid_d0100->get_sort_criteria(
+    IMPORTING et_sort = lt_sort ).
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  d0100_set_grid_events
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*FORM d0100_set_grid_events .
+*
+*  CREATE OBJECT gr_events_d0100.
+*
+**  if gs_test-event-user_command eq con_true.
+**    set handler gr_events_d0100->user_command
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-before_user_command eq con_true.
+**    set handler gr_events_d0100->before_user_command
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-after_user_command eq con_true.
+**    set handler gr_events_d0100->after_user_command
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-double_click eq con_true.
+**    set handler gr_events_d0100->double_click
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-hotspot_click eq con_true.
+**    set handler gr_events_d0100->hotspot_click
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-button_click eq con_true.
+**    set handler gr_events_d0100->button_click
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-onf1 eq con_true.
+**    set handler gr_events_d0100->onf1
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-onf4 eq con_true.
+**    set handler gr_events_d0100->onf4
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-menu_button eq con_true.
+**    set handler gr_events_d0100->menu_button
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-toolbar eq con_true.
+**    set handler gr_events_d0100->toolbar
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-context_menu_request eq con_true.
+**    set handler gr_events_d0100->context_menu_request
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-ondrag eq con_true.
+**    set handler gr_events_d0100->ondrag
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-ondrop eq con_true.
+**    set handler gr_events_d0100->ondrop
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-ondropcomplete eq con_true.
+**    set handler gr_events_d0100->ondropcomplete
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-ondropgetflavor eq con_true.
+**    set handler gr_events_d0100->ondropgetflavor
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-subtotal_text eq con_true.
+**    set handler gr_events_d0100->subtotal_text
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-data_changed eq con_true.
+*  SET HANDLER gr_events_d0100->data_changed
+*              FOR gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-data_changed_finished eq con_true.
+**    set handler gr_events_d0100->data_changed_finished
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-after_refresh eq con_true.
+*  SET HANDLER gr_events_d0100->after_refresh
+*              FOR gr_grid_d0100.
+**  endif.
+*
+**  if gs_test-event-delayed_callback eq con_true.
+**    set handler gr_events_d0100->delayed_callback
+**                for Gr_grid_d0100.
+**    call method Gr_grid_d0100->register_delayed_event
+**      exporting
+**        i_event_id = cl_gui_alv_grid=>mc_evt_delayed_move_curr_cell.
+**  endif.
+**
+**  if gs_test-event-delayed_changed_sel_callback eq con_true.
+**    set handler gr_events_d0100->delayed_changed_sel_callback
+**                for Gr_grid_d0100.
+**    call method Gr_grid_d0100->register_delayed_event
+**      exporting
+**        i_event_id = cl_gui_alv_grid=>mc_evt_delayed_change_select.
+**  endif.
+**
+**  if gs_test-event-top_of_page eq con_true.
+**    set handler gr_events_d0100->top_of_page
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-end_of_list eq con_true.
+**    set handler gr_events_d0100->end_of_list
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-print_top_of_page eq con_true.
+**    set handler gr_events_d0100->print_top_of_page
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-print_end_of_page eq con_true.
+**    set handler gr_events_d0100->print_end_of_page
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-print_top_of_list eq con_true.
+**    set handler gr_events_d0100->print_top_of_list
+**                for Gr_grid_d0100.
+**  endif.
+**
+**  if gs_test-event-print_end_of_list eq con_true.
+**    set handler gr_events_d0100->print_end_of_list
+**                for Gr_grid_d0100.
+**  endif.
+*
+*ENDFORM.                    " d0100_set_grid_events
+
+FORM f4_set USING r_grid TYPE REF TO cl_gui_alv_grid
+                    rt_fieldcat TYPE lvc_t_fcat
+                    rt_bad_cells TYPE lvc_t_modi
+                    r_row_id TYPE lvc_s_roid-row_id
+                    rs_outtab.
+  gr_grid_d0100 = r_grid.
+  gt_fieldcat = rt_fieldcat.
+  gt_bad_cells = rt_bad_cells.
+  g_row_id     = r_row_id.
+  ASSIGN rs_outtab TO <gs_outtab>.
+
+*DATA: ok_code            LIKE sy-ucomm,
+*      save_ok            LIKE sy-ucomm,
+*      g_container        TYPE scrfname VALUE 'CC1',
+*      gr_grid_d0100      TYPE REF TO cl_gui_alv_grid,
+*      g_custom_container TYPE REF TO cl_gui_custom_container,
+*      gr_events_d0100    TYPE REF TO lcl_events_d0100,
+*      gt_fieldcat        TYPE lvc_t_fcat,
+*      g_max              TYPE i VALUE 100.
+*
+
+ENDFORM.
+
+FORM f4 TABLES it_dummy STRUCTURE seahlpres
+                CHANGING r_shlp TYPE shlp_descr_t
+                         r_callcontrol LIKE ddshf4ctrl.
+  DATA: ls_interface TYPE ddshiface.
+  DATA: ls_fieldcat TYPE lvc_s_fcat.
+  DATA: ls_bad_cells TYPE lvc_s_modi.
+  DATA: l_tabix TYPE sy-tabix,
+        f_type,
+        field_s TYPE string..
+
+  FIELD-SYMBOLS: <l_field>.
+
+  LOOP AT r_shlp-interface INTO ls_interface.
+    l_tabix = sy-tabix.
+
+    CHECK ls_interface-f4field IS INITIAL
+        AND NOT ls_interface-valtabname IS INITIAL.
+
+    READ TABLE gt_fieldcat INTO ls_fieldcat
+               WITH KEY ref_table = ls_interface-valtabname
+                        ref_field = ls_interface-valfield.
+    IF sy-subrc = 0.
+      READ TABLE gt_bad_cells INTO ls_bad_cells
+                 WITH KEY fieldname = ls_fieldcat-fieldname
+                          row_id    = g_row_id.
+      IF sy-subrc = 0.
+        ls_interface-value = ls_bad_cells-value.
+        ls_interface-internal = ' '.
+        MODIFY r_shlp-interface FROM ls_interface INDEX l_tabix.
+      ELSE.
+        ASSIGN COMPONENT ls_fieldcat-fieldname OF STRUCTURE
+               <gs_outtab> TO <l_field>.
+
+        IF sy-subrc = 0 AND
+           NOT ( <l_field> IS INITIAL AND
+                 ls_fieldcat-no_init_ch CA 'FB' ).          "Y9CK052000
+
+*<<<Y7AK058537
+          f_type = ls_fieldcat-inttype.
+          IF f_type CA if_salv_bs_log_exp_operand=>c_numeric.
+            field_s = <l_field>.
+            ls_interface-value = field_s.
+          ELSE.
+            ls_interface-value = <l_field>.
+          ENDIF.
+          CLEAR f_type.
+*>>>Y7AK058537
+
+          ls_interface-internal = 'X'.
+
+*<<< YI3K185899 check whether additional fields of DDIC F4-help are editable in the grid:
+* removed due to incompatible change of F4 behavior YI3K252885
+*          if ls_fieldcat-edit is initial.
+*            ls_interface-dispfield = 'X'.  " field at F4 dynpro is display only
+*          endif.
+*>>> YI3K185899
+          MODIFY r_shlp-interface FROM ls_interface INDEX l_tabix.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.                    "f4                                  "f4_set
+
+FORM set_drdn_table.
+*§1.Define a dropdown table and pass it to ALV.
+*   One listbox is referenced by a handle, e.g., '1'.
+*   For each entry that shall appear in this listbox
+*   you have to append a line to the dropdown table
+*   with handle '1'.
+*   This handle can be assigned to several columns
+*   of the output table using the field catalog.
+*
+  DATA: lt_dropdown TYPE lvc_t_drop,
+        ls_dropdown TYPE lvc_s_drop.
+
+  DATA: lt_dral TYPE lvc_t_dral,                            "#EC NEEDED
+        ls_dral TYPE lvc_s_dral.                            "#EC NEEDED
+
+* First listbox (handle '1').
+  ls_dropdown-handle = '1'.
+  ls_dropdown-value = '1 Add & Activate Person'.
+  APPEND ls_dropdown TO lt_dropdown.
+
+  ls_dropdown-handle = '1'.
+  ls_dropdown-value = '2 De-Activation'.
+  APPEND ls_dropdown TO lt_dropdown.
+
+  ls_dropdown-handle = '1'.
+  ls_dropdown-value = '3 Re-Activate Person'.
+  APPEND ls_dropdown TO lt_dropdown.
+
+  ls_dropdown-handle = '1'.
+  ls_dropdown-value = '4 Organization Reassignment'.
+  APPEND ls_dropdown TO lt_dropdown.
+
+  gr_grid_d0100->set_drop_down_table(
+    it_drop_down = lt_dropdown ).
+
+ENDFORM.                               " set_drdn_table
+
+
+*&---------------------------------------------------------------------*
+*&      Form  d0100_event_data_changed
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM d0100_event_data_changed USING er_data_changed TYPE REF
+                                        TO cl_alv_changed_data_protocol
+                                    e_onf4
+                                    e_onf4_before
+                                    e_onf4_after.           "#EC *
+
+
+  DATA: ls_good_cells  TYPE lvc_s_modi.
+
+  LOOP AT er_data_changed->mt_good_cells INTO ls_good_cells.
+    CASE ls_good_cells-fieldname.
+      WHEN 'ACTION'
+        OR 'PERID'
+        OR 'CACID'
+        OR 'AUID'
+        OR 'BEGDA'
+        OR 'PLANS'
+        OR 'ANSVH'
+        OR 'GBDAT'
+        OR 'EMAIL'.
+
+        CALL METHOD er_data_changed->modify_cell
+          EXPORTING
+            i_row_id    = ls_good_cells-row_id
+            i_tabix     = ls_good_cells-tabix
+            i_fieldname = ls_good_cells-fieldname
+            i_value     = ls_good_cells-value.
+      WHEN OTHERS.
+    ENDCASE.
+  ENDLOOP.
+
+
+
+ENDFORM.                    " d0100_event_data_changed
