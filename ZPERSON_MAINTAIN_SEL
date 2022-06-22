@@ -1,0 +1,120 @@
+      *&---------------------------------------------------------------------*
+*& Include          ZPERSON_MAINTAIN_SEL
+*&---------------------------------------------------------------------*
+
+  SELECTION-SCREEN: BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-001.
+*//-- Selection screen
+  PARAMETERS p_test TYPE testrun DEFAULT '' NO-DISPLAY.
+  SELECTION-SCREEN: SKIP 2.
+
+  SELECTION-SCREEN COMMENT /1(79) comm1 .
+  SELECTION-SCREEN COMMENT /1(79) comm2.
+  SELECTION-SCREEN COMMENT /1(79) comm3 .
+  SELECTION-SCREEN COMMENT /1(79) comm4.
+  SELECTION-SCREEN: SKIP 1.
+  SELECTION-SCREEN COMMENT /1(79) comm5 .
+  SELECTION-SCREEN COMMENT /1(79) comm6.
+  SELECTION-SCREEN: SKIP 1.
+  SELECTION-SCREEN COMMENT /1(79) comm7.
+
+
+  SELECTION-SCREEN: SKIP 2.
+  PARAMETERS p_tbdc TYPE apq_ouac DEFAULT '' NO-DISPLAY.
+  PARAMETERS p_mode TYPE apq_ouac DEFAULT 'N' NO-DISPLAY.
+
+*  PARAMETERS P_ACTION TYPE C DEFAULT '1'.
+*  PARAMETERS: p_local  RADIOBUTTON GROUP file DEFAULT 'X' USER-COMMAND local ,
+*              p_unix   RADIOBUTTON GROUP file ,
+  PARAMETERS: p_file01 TYPE file_table LOWER CASE . "OBLIGATORY.
+
+
+*  SELECTION-SCREEN: SKIP 2.
+*  PARAMETERS: P_PRDNI TYPE PRDNI.
+  SELECTION-SCREEN: END OF BLOCK b2.
+
+
+
+
+AT SELECTION-SCREEN OUTPUT.
+  comm1 = 'NOTE: Upon selection of the “Download Template” option,'.
+  comm2 = 'enter a File Name Only, and allow “All Files” as the selection option. '.
+  comm3 = 'Upon the finalization of the execution, a *.CSV file will be created '.
+  comm4 = 'which will open as in Excel/Spreadsheet format.'.
+
+  comm5 = 'The first two row`s (Column Headings) of the file should MUST NOT be altered.'.
+  comm6 = 'Upon completion of entries, the file MUST BE saved as a Tab Delimited Text file.'.
+  comm7 = 'The Upload process will accept ONLY a Tab Delimited Text file'.
+
+
+
+
+
+*//-- Validations
+  AT SELECTION-SCREEN.
+*    IF sscrfields-ucomm = 'LOCAL' AND p_local EQ 'X'.
+**  IF p_local EQ 'X'.
+*      CLEAR:
+*      p_file01.
+*    ENDIF.
+
+    CASE sy-ucomm.
+      WHEN 'DNLD'.
+        PERFORM download_template.
+    ENDCASE.
+
+
+
+  AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file01.
+    PERFORM open_dialog USING 'P_FILE01' CHANGING p_file01.
+
+
+  FORM open_dialog USING fieldname CHANGING p_file.
+*    IF  p_unix = 'X'.
+*      CALL FUNCTION 'F4_DXFILENAME_4_DYNP'
+*        EXPORTING
+*          dynpfield_filename = fieldname
+*          dyname             = sy-cprog "gd_program
+*          dynumb             = sy-dynnr "gd_dynnr
+*          filetype           = 'P'
+*          location           = 'A'
+*          server             = ''.
+*    ELSEIF  p_local = 'X'.
+    DATA: lt_filetable TYPE filetable,
+          lv_subrc     TYPE sysubrc.
+    REFRESH : lt_filetable.
+    cl_gui_frontend_services=>file_open_dialog(
+        EXPORTING window_title = 'Select Input File'
+        CHANGING file_table = lt_filetable
+                 rc = lv_subrc
+        EXCEPTIONS file_open_dialog_failed = 1 ).
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE cx_sy_file_open.
+    ELSE.
+      IF lt_filetable IS NOT INITIAL.
+        p_file = lt_filetable[ 1 ].
+      ENDIF.
+    ENDIF.
+*    ENDIF.
+  ENDFORM.
+
+*  AT SELECTION-SCREEN ON RADIOBUTTON GROUP file.
+*    IF p_unix EQ 'X'.
+*
+*      DATA: lv_unix_base_path TYPE file_table.
+*      lv_unix_base_path-filename = '\\' && sy-host && '\sap\' && sy-sysid && '\' && sy-mandt && '\conv\'.
+*      p_file01 = lv_unix_base_path.
+*
+**    IF sscrfields-ucomm = 'LOCAL'.
+**      CLEAR: sscrfields-ucomm.
+**    ENDIF.
+*    ENDIF.
+
+
+
+
+  INITIALIZATION.
+
+
+    SET PF-STATUS 'ZPFSTATUS'.
+
+  START-OF-SELECTION.
