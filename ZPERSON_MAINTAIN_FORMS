@@ -1,0 +1,2179 @@
+
+FORM user_command USING r_ucomm LIKE sy-ucomm
+rs_selfield TYPE slis_selfield.
+
+  DATA: gd_repid LIKE sy-repid, "Exists
+        ref_grid TYPE REF TO cl_gui_alv_grid.
+  IF ref_grid IS INITIAL.
+    CALL FUNCTION 'GET_GLOBALS_FROM_SLVC_FULLSCR'
+      IMPORTING
+        e_grid = ref_grid.
+  ENDIF.
+  IF NOT ref_grid IS INITIAL.
+    CALL METHOD ref_grid->check_changed_data .
+  ENDIF.
+
+  LOOP AT gt_alv_table ASSIGNING FIELD-SYMBOL(<gs_alv_line>)
+    WHERE chk = 'X'.
+    <gs_alv_line>-color = 'C300'.
+  ENDLOOP.
+  rs_selfield-refresh = 'X'.
+
+ENDFORM. "USER_COMMAND
+
+
+FORM call_interface.
+
+*value( IV_SSN )  TYPE PRDNI OPTIONAL Personnel ID Number
+*value( IV_DODID )  TYPE ZAUDODID OPTIONAL  DOD ID
+*ES_HRI1702 TYPE HRI1702  Personal Data
+*ES_HRI1704	TYPE HRI1704
+*ES_HRI9801	TYPE HRI9801
+*ES_HRI9802	TYPE HRI9802
+*ET_ADRC  TYPE ZAU_ADDRESS_T
+*EV_ACTIVEMILITARY  TYPE XFELD  Active Military/Reserve/Guard
+  DATA:
+    ls_p0002 TYPE p0002, "HR Master Record: Infotype 0002 (Personal Data)
+    lt_p0006 TYPE TABLE OF p0006,  "HR Master Record: Infotype 0006 (Addresses)
+    lt_p0105 TYPE TABLE OF p0105.  "HR Master Record: Infotype 0105 (Communication)
+*EV_DOES_NOT_EXIST  TYPE XFELD  No longer active/or does not exist
+
+  DATA(lo_milpds) = NEW zau_cl_milpds('P').
+
+  LOOP AT gt_alv_table ASSIGNING FIELD-SYMBOL(<ls_alv_inf>).
+
+*    CALL METHOD lo_milpds->get_data
+*      EXPORTING
+*        iv_ssn   = <ls_alv_inf>-perid
+**       IV_DODID =
+*      IMPORTING
+**       ES_HRI1702        =
+**       ES_HRI1704        =
+**       ES_HRI9801        =
+**       ES_HRI9802        =
+**       ET_ADRC  =
+**       EV_ACTIVEMILITARY =
+*        es_p0002 = ls_p0002
+*        et_p0006 = lt_p0006
+*        et_p0105 = lt_p0105
+**       EV_DOES_NOT_EXIST =
+    .
+
+  ENDLOOP.
+
+ENDFORM.
+
+FORM post_data.
+
+
+  DATA:
+    ls_p0002 TYPE p0002, "HR Master Record: Infotype 0002 (Personal Data)
+    lt_p0006 TYPE TABLE OF p0006,  "HR Master Record: Infotype 0006 (Addresses)
+    lt_p0105 TYPE TABLE OF p0105.  "HR Master Record: Infotype 0105 (Communication)
+*EV_DOES_NOT_EXIST  TYPE XFELD  No longer active/or does not exist
+
+  DATA(lo_milpds) = NEW zau_cl_milpds('P').
+  DATA: gs_intf_data TYPE t_main_stru.
+
+
+
+  CHECK p_test IS INITIAL.
+
+  DATA: lt_bdc_msgs TYPE TABLE OF bdcmsgcoll.
+  DATA  lv_bdc_subrc TYPE syst_subrc.
+
+  DATA lv_pernr_001 TYPE bdc_fval.
+
+  DATA : lv_start_date TYPE bdc_fval.
+  DATA : lv_end_date TYPE bdc_fval.
+  DATA : lv_end_dt TYPE sy-datum.
+  WRITE sy-datum TO lv_start_date DD/MM/YYYY.
+  lv_end_dt = '99991231'.
+  lv_end_date = |{ lv_end_dt DATE = USER }|.
+
+
+  LOOP AT gt_alv_table ASSIGNING FIELD-SYMBOL(<ls_alv_table>)
+    WHERE action IS NOT INITIAL.
+
+    DATA(lv_records_processed) = abap_true.
+
+*    CHECK <ls_alv_table>-light = 3. " Process only records with green status
+
+********* Do not reset the line status
+*    <ls_alv_table>-light = '2'.  "Yellow
+*    <ls_alv_table>-type = ''.
+*    <ls_alv_table>-message = ''.
+
+    IF <ls_alv_table>-intf_nfnd = abap_true.
+      <ls_alv_table>-light = '2'.  "Yellow
+      <ls_alv_table>-type = ''.
+      <ls_alv_table>-message = ''.
+    ENDIF.
+
+
+*-- read Data from local file ?? may not need this ....
+    READ TABLE  gt_main_data INTO DATA(ls_main_data)
+      WITH KEY pa0002-perid = <ls_alv_table>-perid.
+
+
+
+
+
+**-- read data from interface using CAC ID
+*    IF <ls_alv_table>-cacid IS NOT INITIAL.
+*      CLEAR: gs_intf_data.
+*      DATA: lv_dodid TYPE zaudodid.
+*      lv_dodid = <ls_alv_table>-cacid.
+*      CALL METHOD lo_milpds->get_data
+*        EXPORTING
+**         iv_ssn   = ''
+*          iv_dodid = lv_dodid
+**         iv_gbdat = ''
+**         iv_lastname = ''
+*        IMPORTING
+**         ES_HRI1702  =
+**         ES_HRI1704  =
+**         ES_HRI9801  =
+**         ES_HRI9802  =
+**         ET_ADRC  =
+**         EV_ACTIVEMILITARY =
+*          es_p0002 = ls_p0002
+*          et_p0006 = lt_p0006
+*          et_p0105 = lt_p0105.
+**       EV_DOES_NOT_EXIST =.
+*      MOVE-CORRESPONDING ls_p0002 TO gs_intf_data-pa0002.
+*      READ TABLE lt_p0006 INTO DATA(ls_p0006_1)  INDEX 1.
+*      IF sy-subrc = 0.
+*        MOVE-CORRESPONDING ls_p0006_1 TO gs_intf_data-pa0006_1.
+**  ( column_name = 'STREET_AND_HOUSE_NO' table_name = 'PA0006_1' field_name = 'STRAS' alv_field = 'STRAS' )
+**  ( column_name = 'CITY' table_name = 'PA0006_1' field_name = 'ORT01' alv_field = 'ORT01' )
+**  ( column_name = 'STATE' table_name = 'PA0006_1' field_name = 'STATE' alv_field = 'STATE' )
+**  ( column_name = 'POSTAL_CODE' table_name = 'PA0006_1' field_name = 'PSTLZ' alv_field = 'PSTLZ' )
+**  ( column_name = 'COUNTRY' table_name = 'PA0006_1' field_name = 'LAND1' alv_field = 'LAND1' )
+*
+*        <ls_alv_table>-stras = gs_intf_data-pa0006_1-stras.
+*        <ls_alv_table>-ort01 = gs_intf_data-pa0006_1-ort01.
+*        <ls_alv_table>-state = gs_intf_data-pa0006_1-state.
+*        <ls_alv_table>-pstlz = gs_intf_data-pa0006_1-pstlz.
+*        <ls_alv_table>-land1 = gs_intf_data-pa0006_1-land1.
+*
+*      ENDIF.
+*      READ TABLE lt_p0006 INTO DATA(ls_p0006_2)  INDEX 2.
+*      IF sy-subrc = 0.
+*        MOVE-CORRESPONDING ls_p0006_2 TO gs_intf_data-pa0006_2.
+**  ( column_name = 'STREET_AND_HOUSE_NO' table_name = 'PA0006_2' field_name = 'STRAS' alv_field = 'STRAS' )
+**  ( column_name = 'CITY' table_name = 'PA0006_2' field_name = 'ORT01' alv_field = 'ORT01' )
+**  ( column_name = 'STATE' table_name = 'PA0006_2' field_name = 'STATE' alv_field = 'STATE' )
+**  ( column_name = 'POSTAL_CODE' table_name = 'PA0006_2' field_name = 'PSTLZ' alv_field = 'PSTLZ' )
+**  ( column_name = 'COUNTRY' table_name = 'PA0006_2' field_name = 'LAND1' alv_field = 'LAND1' )
+*
+*        <ls_alv_table>-stras2 = gs_intf_data-pa0006_2-stras.
+*        <ls_alv_table>-ort012 = gs_intf_data-pa0006_2-ort01.
+*        <ls_alv_table>-state2 = gs_intf_data-pa0006_2-state.
+*        <ls_alv_table>-pstlz2 = gs_intf_data-pa0006_2-pstlz.
+*        <ls_alv_table>-land12 = gs_intf_data-pa0006_2-land1.
+*
+*      ENDIF.
+*
+*
+*      READ TABLE lt_p0105 INTO DATA(ls_p0105_0001)  WITH KEY subty = '0001'. "SAP System generated User id
+**      IF sy-subrc = 0.
+**        MOVE-CORRESPONDING ls_p0105_0001 TO  gs_intf_data-pa0105_0001.
+**      ENDIF.
+*      READ TABLE lt_p0105 INTO DATA(ls_p0105_0010)  WITH KEY subty = '0010'. "Email id
+*      IF sy-subrc = 0.
+*        MOVE-CORRESPONDING ls_p0105_0010 TO  gs_intf_data-pa0105_0010.
+*        <ls_alv_table>-email = gs_intf_data-pa0105_0010-usrid.
+*        IF <ls_alv_table>-email IS INITIAL.
+*          <ls_alv_table>-email = gs_intf_data-pa0105_0010-usrid_long.
+*        ENDIF.
+*      ENDIF.
+*      READ TABLE lt_p0105 INTO DATA(ls_p0105_9000)  WITH KEY subty = '9000'.  " CAC ID
+*      IF sy-subrc = 0.
+*        MOVE-CORRESPONDING ls_p0105_9000 TO  gs_intf_data-pa0105_9000.
+*        <ls_alv_table>-cacid = gs_intf_data-pa0105_9000-usrid.
+*      ENDIF.
+*      READ TABLE lt_p0105 INTO DATA(ls_p0105_9001)  WITH KEY subty = '9001'.  " AU ID
+*      IF sy-subrc = 0.
+*        MOVE-CORRESPONDING ls_p0105_9001 TO  gs_intf_data-pa0105_9001.
+*        <ls_alv_table>-auid = gs_intf_data-pa0105_9001-usrid.
+*      ENDIF.
+**-- map Alv / intf data to  BDC Fm table
+**    -- wip ...
+*    ENDIF.
+
+    IF   <ls_alv_table>-short IS NOT INITIAL.
+      SELECT SINGLE objid FROM hrp1000 INTO @DATA(lv_hrp1000_objid)
+        WHERE
+                plvar = '01'
+            AND otype = 'S'
+            AND ( begda LE @<ls_alv_table>-begda
+              AND endda GE @<ls_alv_table>-begda )
+          AND (   objid = @<ls_alv_table>-plans
+          OR short =  @<ls_alv_table>-short ).
+      IF sy-subrc EQ 0.
+        <ls_alv_table>-plans = lv_hrp1000_objid.
+      ELSE.
+        <ls_alv_table>-light = '1'.  "Red
+        <ls_alv_table>-type = 'E'.
+        <ls_alv_table>-message = 'Please enter valid Position ID or Abbr'.
+
+      ENDIF.
+    ENDIF.
+
+
+    IF <ls_alv_table>-action(1) =  '1'. "P_ACTION = 1.
+      IF <ls_alv_table>-type NE 'E'.
+
+
+        IF <ls_alv_table>-perid IS INITIAL.
+*        <ls_alv_table>-light = '1'.  "Red
+*        <ls_alv_table>-type = 'E'.
+*        <ls_alv_table>-message = 'Please enter SSN No'.
+*-- 12/14  Replace SSN with CACID
+          <ls_alv_table>-perid =  <ls_alv_table>-cacid.
+        ENDIF.
+        IF <ls_alv_table>-auid IS INITIAL.
+*        <ls_alv_table>-light = '1'.  "Red
+*        <ls_alv_table>-type = 'E'.
+*        <ls_alv_table>-message = 'Please enter AU Id'.
+*-- 12/14  Replace AUID with CACID
+          <ls_alv_table>-auid =  <ls_alv_table>-cacid.
+        ENDIF.
+
+
+
+
+        IF <ls_alv_table>-intf_nfnd = abap_true
+          AND ( <ls_alv_table>-stras IS INITIAL
+         OR <ls_alv_table>-ort01 IS INITIAL
+         OR <ls_alv_table>-state  IS INITIAL
+         OR <ls_alv_table>-pstlz  IS INITIAL
+*         OR <ls_alv_table>-land1  IS INITIAL
+         OR <ls_alv_table>-stras2  IS INITIAL
+         OR <ls_alv_table>-ort012  IS INITIAL
+         OR <ls_alv_table>-state2  IS INITIAL
+         OR <ls_alv_table>-pstlz2  IS INITIAL
+*         OR <ls_alv_table>-land12  IS INITIAL
+          ).
+
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please enter address data'.
+*        <ls_alv_table>-begda = sy-datum.
+
+        ELSE.
+          <ls_alv_table>-light = '3'.  "Green
+          <ls_alv_table>-type = ''.
+          <ls_alv_table>-message = ''.
+
+        ENDIF.
+
+        IF <ls_alv_table>-email IS INITIAL.
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please enter Email Address'.
+        ENDIF.
+
+        IF <ls_alv_table>-plans IS INITIAL
+          AND <ls_alv_table>-short IS INITIAL.
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please enter Position ID or Abbr'.
+        ENDIF.
+
+        IF <ls_alv_table>-begda IS INITIAL.
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please enter Effective Date'.
+        ENDIF.
+
+        IF <ls_alv_table>-intf_nfnd = abap_true
+          AND <ls_alv_table>-gbdat IS INITIAL.
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please enter Date of Birth'.
+        ENDIF.
+
+        IF <ls_alv_table>-intf_nfnd = abap_true
+          AND <ls_alv_table>-nachn IS INITIAL.
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please enter Last Name'.
+        ENDIF.
+        IF <ls_alv_table>-cacid IS INITIAL.
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please enter CACID '.
+        ENDIF.
+
+
+      ENDIF.
+
+    ELSE.
+      IF <ls_alv_table>-perid IS INITIAL
+         AND <ls_alv_table>-cacid IS INITIAL
+         AND <ls_alv_table>-auid IS INITIAL.
+
+        <ls_alv_table>-light = '1'.  "Red
+        <ls_alv_table>-type = 'E'.
+        <ls_alv_table>-message = 'Please enter either SSN, CACID  or AUID '.
+
+      ENDIF.
+
+      IF <ls_alv_table>-plans IS INITIAL
+        AND <ls_alv_table>-short IS INITIAL.
+        <ls_alv_table>-light = '1'.  "Red
+        <ls_alv_table>-type = 'E'.
+        <ls_alv_table>-message = 'Please enter Position ID or Abbr'.
+
+      ENDIF.
+      IF <ls_alv_table>-action(1) NE  '2'.
+        IF <ls_alv_table>-plans = '99999999'.
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please enter valid Position ID or Abbr'.
+
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*-- Validate before post
+    IF     <ls_alv_table>-light <> '1'.  "Red
+
+      <ls_alv_table>-light = '3'.  "Green
+      <ls_alv_table>-type = ''.
+      <ls_alv_table>-message = ''.
+
+*         0001 "System user name (SY-UNAME)
+*         0010 "E-mail
+*         9000 "CAC ID Reference
+*         9001 "AU ID Reference
+*         9002 "SSN or Other Personal ID
+
+
+      IF <ls_alv_table>-auid IS NOT INITIAL.
+        SELECT SINGLE pernr INTO @DATA(lv_pa0105_9001_pernr)
+          FROM pa0105
+          WHERE usrid = @<ls_alv_table>-auid.
+        IF sy-subrc = 0.
+          IF <ls_alv_table>-action(1) =  '1'. "P_ACTION = 1.
+            <ls_alv_table>-light = '1'.  "Red
+            <ls_alv_table>-type = 'E'.
+            <ls_alv_table>-message = |AU ID Already exists for PERNR - | && lv_pa0105_9001_pernr.
+          ELSE.
+            lv_pernr_001 = lv_pa0105_9001_pernr.
+            <ls_alv_table>-pernr = lv_pernr_001.
+
+          ENDIF.
+        ELSE.
+*      CLEAR: lv_pernr_001.
+          IF <ls_alv_table>-action(1) <>  '1'.
+            <ls_alv_table>-light = '1'.  "Red
+            <ls_alv_table>-type = 'E'.
+            <ls_alv_table>-message = 'AU ID does not exists '.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+
+      IF <ls_alv_table>-perid IS NOT INITIAL.
+        SELECT SINGLE pernr INTO @DATA(lv_pa0105_9002_pernr)
+          FROM pa0105
+          WHERE usrid = @<ls_alv_table>-perid.
+        IF sy-subrc = 0.
+          IF <ls_alv_table>-action(1) =  '1'. "New Person
+            <ls_alv_table>-light = '1'.  "Red
+            <ls_alv_table>-type = 'E'.
+            <ls_alv_table>-message = |SSN Already exists for PERNR | && lv_pa0105_9002_pernr.
+          ELSE.
+            lv_pernr_001 = lv_pa0105_9002_pernr.  "BDC
+            <ls_alv_table>-pernr = lv_pernr_001.  "ALV
+
+**- check previous action
+*            SELECT * FROM pa0000 INTO TABLE @DATA(lt_pa0000)
+*            WHERE pernr = @lv_pa0105_9002_pernr
+*              ORDER BY begda DESCENDING.
+*            IF sy-subrc = 0.
+*              READ TABLE lt_pa0000 INTO DATA(ls_pa0000) INDEX 1.
+*              IF sy-subrc = 0.
+**01  Add & Activate Person (AU)
+**02  De-Activation (AU)
+**03  Re-Activate Person (AU)
+**04  Organization Reassignment (AU)
+*                IF <ls_alv_table>-action(1) = 2 AND  ls_pa0000-massn = '02'.
+*                  <ls_alv_table>-light = '1'.  "Red
+*                  <ls_alv_table>-type = 'E'.
+*                  <ls_alv_table>-message = | Current staus De-Activation for  | && <ls_alv_table>-pernr.
+*                ELSEIF <ls_alv_table>-action(1) = 3 AND ls_pa0000-massn = '03'.
+*                  <ls_alv_table>-light = '1'.  "Red
+*                  <ls_alv_table>-type = 'E'.
+*                  <ls_alv_table>-message = |Current staus Re-Activate for  | && <ls_alv_table>-pernr.
+*                ELSEIF ls_pa0000-begda GE <ls_alv_table>-begda.
+*                  <ls_alv_table>-light = '1'.  "Red
+*                  <ls_alv_table>-type = 'E'.
+*                  <ls_alv_table>-message = |Start date must be greater than | && |{ ls_pa0000-begda DATE = USER }|.
+*                ENDIF.
+*
+*              ENDIF.
+*            ENDIF.
+          ENDIF.
+        ELSE.
+          CLEAR: lv_pernr_001.
+
+          IF <ls_alv_table>-action(1) <>  '1'.
+            <ls_alv_table>-light = '1'.  "Red
+            <ls_alv_table>-type = 'E'.
+            <ls_alv_table>-message = 'SSN does not exists '.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+
+      IF <ls_alv_table>-cacid IS NOT INITIAL.
+        SELECT SINGLE pernr INTO @DATA(lv_pa0105_9000_pernr)
+          FROM pa0105
+          WHERE usrid = @<ls_alv_table>-cacid.
+        IF sy-subrc = 0.
+          IF <ls_alv_table>-action(1) =  '1'. "P_ACTION = 1.
+            <ls_alv_table>-light = '1'.  "Red
+            <ls_alv_table>-type = 'E'.
+            <ls_alv_table>-message = |CAC ID Already exists for PERNR - | && lv_pa0105_9000_pernr.
+          ELSE.
+            lv_pernr_001 = lv_pa0105_9000_pernr.  "BDC
+            <ls_alv_table>-pernr = lv_pernr_001.  "ALV
+
+          ENDIF.
+        ELSE.
+*      CLEAR: lv_pernr_001.
+          IF <ls_alv_table>-action(1) <>  '1'.
+            <ls_alv_table>-light = '1'.  "Red
+            <ls_alv_table>-type = 'E'.
+            <ls_alv_table>-message = 'CAC ID does not exists '.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+
+
+
+
+*- check previous action
+      SELECT * FROM pa0000 INTO TABLE @DATA(lt_pa0000)
+      WHERE pernr = @<ls_alv_table>-pernr
+        ORDER BY begda DESCENDING.
+      IF sy-subrc = 0.
+        READ TABLE lt_pa0000 INTO DATA(ls_pa0000) INDEX 1.
+        IF sy-subrc = 0.
+*01	Add & Activate Person (AU)
+*02	De-Activation (AU)
+*03	Re-Activate Person (AU)
+*04	Organization Reassignment (AU)
+          IF <ls_alv_table>-action(1) = 2 AND  ls_pa0000-massn = '02'.
+            <ls_alv_table>-light = '1'.  "Red
+            <ls_alv_table>-type = 'E'.
+            <ls_alv_table>-message = | Current staus De-Activation for  | && <ls_alv_table>-pernr.
+          ELSEIF <ls_alv_table>-action(1) = 3 AND ls_pa0000-massn = '03'.
+            <ls_alv_table>-light = '1'.  "Red
+            <ls_alv_table>-type = 'E'.
+            <ls_alv_table>-message = |Current staus Re-Activate for  | && <ls_alv_table>-pernr.
+          ELSEIF ls_pa0000-begda GE <ls_alv_table>-begda.
+            IF <ls_alv_table>-action(1) = 2
+              OR <ls_alv_table>-action(1) = 3.
+              <ls_alv_table>-light = '2'.  "Yellow
+              <ls_alv_table>-type = 'I'.
+              <ls_alv_table>-message = |Start date adjusted to greater than | && |{ ls_pa0000-begda DATE = USER }|.
+              <ls_alv_table>-begda =  ls_pa0000-begda + 1.
+            ENDIF.
+          ELSE.
+            <ls_alv_table>-light = '2'.  "Yellow
+            <ls_alv_table>-type = ''.
+            <ls_alv_table>-message = ''.
+
+          ENDIF.
+
+        ENDIF.
+      ENDIF.
+
+    ENDIF.
+
+
+
+
+
+
+
+*-- data formatted to input to BDC FMs
+    DATA ls_fm_input LIKE LINE OF gt_fm_input.
+
+    SET COUNTRY  'US'.
+    WRITE <ls_alv_table>-begda TO ls_fm_input-begda MMDDYY.
+    IF ls_fm_input-begda IS INITIAL.
+      WRITE lv_start_date TO ls_fm_input-begda MMDDYY.
+    ENDIF.
+    ls_fm_input-begda = |{ <ls_alv_table>-begda DATE = USER }|.
+
+    WRITE <ls_alv_table>-gbdat TO ls_fm_input-gbdat MMDDYY.
+    ls_fm_input-gbdat = |{ <ls_alv_table>-gbdat DATE = USER }|.
+
+
+
+*-- Org key
+    DATA: lv_btrtl TYPE  btrtl.
+    PERFORM get_subarea USING
+          <ls_alv_table>-plans
+          CHANGING lv_btrtl.
+    ls_fm_input-btrtl = lv_btrtl.
+
+    IF <ls_alv_table>-land1 IS INITIAL.
+      <ls_alv_table>-land1 = 'US'.
+    ENDIF.
+    IF <ls_alv_table>-land12 IS INITIAL.
+      <ls_alv_table>-land12 = 'US'.
+    ENDIF.
+
+* <ls_alv_table>-stras = 'Address 1'.
+* <ls_alv_table>-ort01 = 'Baltimore'.
+* <ls_alv_table>-state = 'MD'.
+* <ls_alv_table>-pstlz = '21044'.
+* <ls_alv_table>-land1 = 'US'.
+*
+* <ls_alv_table>-stras2 = 'Address 1'.
+* <ls_alv_table>-ort012 = 'Baltimore'.
+* <ls_alv_table>-state2 = 'MD'.
+* <ls_alv_table>-pstlz2 = '21044'.
+* <ls_alv_table>-land12 = 'US'.
+
+*    DATA(lv_objid) = CONV hrobjid( <ls_alv_table>-plans ).
+*    SELECT SINGLE sobid INTO @DATA(lv_sobid)  FROM hrp1001
+*      WHERE otype = 'S'
+*           AND objid = @lv_objid
+*           AND begda LE @<ls_alv_table>-begda
+*           AND endda GE @<ls_alv_table>-begda
+*           AND sclas = 'C'.
+
+
+    ls_fm_input-pernr = <ls_alv_table>-pernr.
+    ls_fm_input-perid = <ls_alv_table>-perid.
+    ls_fm_input-massg = <ls_alv_table>-massg.
+    ls_fm_input-stat2 = <ls_alv_table>-stat2.
+    ls_fm_input-plans = <ls_alv_table>-plans.
+*    ls_fm_input-stell = lv_sobid.
+
+    ls_fm_input-ansvh = <ls_alv_table>-ansvh.
+    ls_fm_input-nachn = <ls_alv_table>-nachn.
+    ls_fm_input-vorna = <ls_alv_table>-vorna.
+
+    ls_fm_input-anssa = <ls_alv_table>-anssa.
+    ls_fm_input-stras = <ls_alv_table>-stras.
+    ls_fm_input-ort01 = <ls_alv_table>-ort01.
+    ls_fm_input-state = <ls_alv_table>-state.
+    ls_fm_input-pstlz = <ls_alv_table>-pstlz.
+    ls_fm_input-land1 = 'US'. "<ls_alv_table>-land1.
+
+    ls_fm_input-stras2 = <ls_alv_table>-stras2.
+    ls_fm_input-ort012 = <ls_alv_table>-ort012.
+    ls_fm_input-state2 = <ls_alv_table>-state2.
+    ls_fm_input-pstlz2 = <ls_alv_table>-pstlz2.
+    ls_fm_input-land12 = 'US'. "<ls_alv_table>-land12.
+
+    ls_fm_input-uname = <ls_alv_table>-uname.
+    ls_fm_input-email = <ls_alv_table>-email.
+    ls_fm_input-cacid = <ls_alv_table>-cacid.
+    ls_fm_input-auid  = <ls_alv_table>-auid.
+
+
+
+*-- Post data when good
+    IF  <ls_alv_table>-light <> '1'.  "1 = Red
+      CLEAR lv_bdc_subrc.
+      REFRESH lt_bdc_msgs.
+
+      CASE  <ls_alv_table>-action(1).  "P_ACTION.
+        WHEN '1'.  "Add & Activate
+          IF <ls_alv_table>-pernr IS INITIAL.
+
+            IF sy-sysid = 'SD1'.
+            ENDIF.
+
+            CALL FUNCTION 'Z_PERSON_ADD'
+              EXPORTING
+                im_test        = p_tbdc
+                ctu            = 'X'
+                mode           = p_mode
+                update         = 'L'
+*               GROUP          =
+                user           = sy-uname
+*               KEEP           =
+*               HOLDDATE       =
+                nodata         = '/'
+                einda_001      = ls_fm_input-begda
+                selec_01_002   = 'X'
+                begda_003      = ls_fm_input-begda
+                endda_004      = lv_end_date
+                massn_005      = '01'
+                massg_006      = '01'
+                plans_007      = ls_fm_input-plans
+                pernr_008      = '' " Set to space
+                begda_009      = ls_fm_input-begda
+                endda_010      = lv_end_date
+                massn_011      = '01'
+                massg_012      = '01'
+                plans_013      = ls_fm_input-plans
+                werks_014      = '0001'
+                persg_015      = 'C'
+                persk_016      = '02'
+                begda_017      = ls_fm_input-begda
+                endda_018      = lv_end_date
+                btrtl_019      = ls_fm_input-btrtl "'0001'
+                abkrs_020      = '99'
+                ansvh_021      = 'AA'
+                plans_022      = ls_fm_input-plans
+                stell_023      = '' "ls_fm_input-stell "'50000371' "Not used
+                orgeh_024      = '50000101' "Not used
+                vdsk1_025      = ls_fm_input-btrtl "'0001'     "Org Key
+                begda_026      = ls_fm_input-begda
+                endda_027      = lv_end_date
+                nachn_028      = ls_fm_input-nachn "'Test Last name'
+                vorna_029      = ls_fm_input-vorna
+                gbdat_030      = ls_fm_input-gbdat
+                gesc1_031      = 'X'
+                gesc3_032      = ''
+                sprsl_033      = 'EN'
+                begda_034      = ls_fm_input-begda
+                endda_035      = lv_end_date
+                stras_036      = ls_fm_input-stras
+                ort01_037      = ls_fm_input-ort01
+                state_038      = ls_fm_input-state
+                pstlz_039      = ls_fm_input-pstlz
+                land1_040      = ls_fm_input-land1
+                begda_041      = ls_fm_input-begda
+                endda_042      = lv_end_date
+                stras_043      = ls_fm_input-stras2
+                locat_044      = ''
+                ort01_045      = ls_fm_input-ort012
+                state_046      = ls_fm_input-state2
+                pstlz_047      = ls_fm_input-pstlz2
+                land1_048      = ls_fm_input-land12
+                begda_049      = ls_fm_input-begda
+                endda_050      = lv_end_date
+                usrid_051      = ls_fm_input-cacid  "System id = cacid recent change 10/20/21
+                begda_052      = ls_fm_input-begda
+                endda_053      = lv_end_date
+                usrid_long_054 = ls_fm_input-email "LV_PA0105_0010_ID "'test1@gmail.com'
+                begda_055      = ls_fm_input-begda
+                endda_056      = lv_end_date
+                usrid_long_057 = ls_fm_input-email "LV_PA0105_0010_ID  "'TEST1@GMAIL.COM'
+                begda_058      = ls_fm_input-begda
+                endda_059      = lv_end_date
+                usrid_060      = ls_fm_input-cacid "LV_PA0105_9000_ID " CAC ID
+                begda_061      = ls_fm_input-begda
+                endda_062      = lv_end_date
+                usrid_063      = ls_fm_input-auid "LV_PA0105_9001_ID " AU ID
+                begda_064      = ls_fm_input-begda
+                endda_065      = lv_end_date
+                usrid_066      = ls_fm_input-auid "LV_PA0105_9001_ID " AU ID
+                begda_067      = ls_fm_input-begda
+                endda_068      = lv_end_date
+                usrid_069      = ls_fm_input-perid "LV_PA0105_9002_ID "SSN
+                begda_070      = ls_fm_input-begda
+                endda_071      = lv_end_date
+                usrid_072      = ls_fm_input-perid "LV_PA0105_9002_ID "SSN
+              IMPORTING
+                subrc          = lv_bdc_subrc
+              TABLES
+                messtab        = lt_bdc_msgs.
+
+            IF lv_bdc_subrc = 0.
+              GET PARAMETER ID 'PER' FIELD <ls_alv_table>-pernr.
+              lv_pernr_001 = <ls_alv_table>-pernr.
+              <ls_alv_table>-light = '3'.  "Green
+              CLEAR: <ls_alv_table>-type,
+                    <ls_alv_table>-id,
+                    <ls_alv_table>-number,
+                    <ls_alv_table>-message.
+
+              <ls_alv_table>-message = 'Person Added successfully'.
+              COMMIT WORK.
+
+
+            ELSE.
+              <ls_alv_table>-light = '1'.  "Red
+              READ TABLE lt_bdc_msgs INTO DATA(ls_bdc_msgs_1) WITH KEY msgtyp = 'E'.
+              IF sy-subrc = 0.
+                <ls_alv_table>-type = ls_bdc_msgs_1-msgtyp.
+                <ls_alv_table>-id = ls_bdc_msgs_1-msgid.
+                <ls_alv_table>-number = ls_bdc_msgs_1-msgnr.
+
+                CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+                  EXPORTING
+                    msgid               = ls_bdc_msgs_1-msgid
+                    msgnr               = ls_bdc_msgs_1-msgnr
+                    msgv1               = ls_bdc_msgs_1-msgv1
+                    msgv2               = ls_bdc_msgs_1-msgv2
+                    msgv3               = ls_bdc_msgs_1-msgv3
+                    msgv4               = ls_bdc_msgs_1-msgv4
+                  IMPORTING
+                    message_text_output = <ls_alv_table>-message.
+              ELSE.
+                GET PARAMETER ID 'PER' FIELD <ls_alv_table>-pernr.
+                lv_pernr_001 = <ls_alv_table>-pernr.
+                <ls_alv_table>-light = '3'.  "Green
+                CLEAR: <ls_alv_table>-type,
+                      <ls_alv_table>-id,
+                      <ls_alv_table>-number,
+                      <ls_alv_table>-message.
+
+                <ls_alv_table>-message = 'Person Added successfully'.
+
+              ENDIF.
+
+            ENDIF.
+          ELSE.
+            <ls_alv_table>-light = '1'.  "Red
+            CLEAR: <ls_alv_table>-type,
+                  <ls_alv_table>-id,
+                  <ls_alv_table>-number,
+                  <ls_alv_table>-message.
+
+            <ls_alv_table>-message = 'Person already exists'.
+
+          ENDIF.
+
+
+        WHEN '2'. "De-Activate
+
+          CALL FUNCTION 'Z_PERSON_DEACT'
+            EXPORTING
+              im_test      = p_tbdc
+              ctu          = 'X'
+              mode         = p_mode
+              update       = 'L'
+*             GROUP        =
+              user         = sy-uname
+*             KEEP         =
+*             HOLDDATE     =
+              nodata       = '/'
+              pernr_001    = lv_pernr_001
+              einda_002    = ls_fm_input-begda
+              selec_02_003 = 'X'
+              begda_004    = ls_fm_input-begda
+*             massn_005    = '02'
+*             massg_006    = '01'
+*             plans_007    = '99999999'
+*             werks_008    = '0001'
+*             persg_009    = 'C'
+*             persk_010    = '02'
+              begda_011    = ls_fm_input-begda
+*             endda_012    = lv_end_date
+*             btrtl_013    = ls_fm_input-btrtl "'0001'
+              abkrs_014    = '99'
+              ansvh_015    = 'AA'
+              plans_016    = '99999999'
+              stell_017    = ''
+              orgeh_018    = ''
+              vdsk1_019    = '9999' "Org Key for deactivate
+            IMPORTING
+              subrc        = lv_bdc_subrc
+            TABLES
+              messtab      = lt_bdc_msgs.
+          .
+          IF lv_bdc_subrc = 0.
+            <ls_alv_table>-light = '3'.  "Green
+            CLEAR: <ls_alv_table>-type,
+                  <ls_alv_table>-id,
+                  <ls_alv_table>-number,
+                  <ls_alv_table>-message.
+            <ls_alv_table>-message = 'Person Deactivated successfully'.
+
+          ELSE.
+            <ls_alv_table>-light = '1'.  "Red
+            READ TABLE lt_bdc_msgs INTO DATA(ls_bdc_msgs_2) WITH KEY msgtyp = 'E'.
+            IF sy-subrc = 0.
+              <ls_alv_table>-type = ls_bdc_msgs_2-msgtyp.
+              <ls_alv_table>-id = ls_bdc_msgs_2-msgid.
+              <ls_alv_table>-number = ls_bdc_msgs_2-msgnr.
+              CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+                EXPORTING
+                  msgid               = ls_bdc_msgs_2-msgid
+                  msgnr               = ls_bdc_msgs_2-msgnr
+                  msgv1               = ls_bdc_msgs_2-msgv1
+                  msgv2               = ls_bdc_msgs_2-msgv2
+                  msgv3               = ls_bdc_msgs_2-msgv3
+                  msgv4               = ls_bdc_msgs_2-msgv4
+                IMPORTING
+                  message_text_output = <ls_alv_table>-message.
+            ENDIF.
+
+          ENDIF.
+
+        WHEN '3'.  "Re-Activate
+
+          CALL FUNCTION 'Z_PERSON_REACT2'
+            EXPORTING
+              im_test        = p_tbdc
+              ctu            = 'X'
+              mode           = p_mode
+              update         = 'L'
+*             GROUP          =
+              user           = sy-uname
+*             KEEP           =
+*             HOLDDATE       =
+              nodata         = '/'
+              pernr_001      = lv_pernr_001
+              einda_002      = ls_fm_input-begda
+              selec_03_003   = 'X'
+              begda_004      = ls_fm_input-begda "'17.08.2021'
+              endda_005      = lv_end_date
+              massn_006      = '03'
+              plans_007      = ls_fm_input-plans  "'50000448'
+              werks_008      = '0001'
+              persg_009      = 'C'
+              persk_010      = '02'
+              begda_011      = ls_fm_input-begda "'09/05/2021'
+              endda_012      = lv_end_date " '12/31/9999'
+              massn_013      = '03'
+              plans_014      = ls_fm_input-plans "'50000448'
+              werks_015      = '0001'
+              persg_016      = 'C'
+              persk_017      = '02'
+              begda_018      = ls_fm_input-begda "'17.08.2021'
+              endda_019      = lv_end_date
+              btrtl_020      = ls_fm_input-btrtl "'0001'
+              abkrs_021      = '99'
+              ansvh_022      = 'AA'
+              plans_023      = ls_fm_input-plans "''50000448'
+              stell_024      = '50000371'  "Not used
+              orgeh_025      = '50000101'  "Not used
+              vdsk1_026      = ls_fm_input-btrtl "'0001'
+              begda_027      = ls_fm_input-begda "'09/05/2021'
+              endda_028      = lv_end_date
+              nachn_029      = ls_fm_input-nachn "'Test Last name'
+              vorna_030      = ls_fm_input-vorna
+              gbdat_031      = ls_fm_input-gbdat
+              gesc1_032      = 'X'
+              sprsl_033      = 'EN'
+              begda_034      = ls_fm_input-begda "'09/05/2021'
+              endda_035      = lv_end_date
+              stras_036      = ls_fm_input-stras
+              ort01_037      = ls_fm_input-ort01
+              state_038      = ls_fm_input-state
+              pstlz_039      = ls_fm_input-pstlz
+              land1_040      = ls_fm_input-land1
+              begda_041      = ls_fm_input-begda
+              endda_042      = lv_end_date
+              stras_043      = ls_fm_input-stras2
+              ort01_044      = ls_fm_input-ort012
+              state_045      = ls_fm_input-state2
+              pstlz_046      = ls_fm_input-pstlz2
+              land1_047      = ls_fm_input-land12
+              begda_048      = ls_fm_input-begda "'09/05/2021'
+              endda_049      = lv_end_date
+              usrid_050      = ls_fm_input-cacid  "System id = cacid recent change 10/20/21
+              begda_051      = ls_fm_input-begda "
+              endda_052      = lv_end_date
+              usrid_long_053 = ls_fm_input-email "'TEST0061@GMAIL.COM'
+              begda_054      = ls_fm_input-begda "'09/05/2021'
+              endda_055      = lv_end_date
+              usrid_056      = ls_fm_input-cacid "'123456699'
+              begda_057      = ls_fm_input-begda "'09/05/2021'
+              endda_058      = lv_end_date
+              usrid_059      = ls_fm_input-auid
+              begda_060      = ls_fm_input-begda "'09/05/2021'
+              endda_061      = lv_end_date
+              usrid_062      = ls_fm_input-perid
+*             begda_063      = ls_fm_input-begda "'09/05/2021'
+*             endda_064      = lv_end_date
+*             usrid_065      = '123456999'
+            IMPORTING
+              subrc          = lv_bdc_subrc
+            TABLES
+              messtab        = lt_bdc_msgs.
+          .
+
+          IF lv_bdc_subrc = 0.
+            <ls_alv_table>-light = '3'.  "Green
+            CLEAR: <ls_alv_table>-type,
+                  <ls_alv_table>-id,
+                  <ls_alv_table>-number,
+                  <ls_alv_table>-message.
+            <ls_alv_table>-message = 'Person Reactivated successfully'.
+
+          ELSE.
+            <ls_alv_table>-light = '1'.  "Red
+            READ TABLE lt_bdc_msgs INTO DATA(ls_bdc_msgs_3) WITH KEY msgtyp = 'E'.
+            IF sy-subrc = 0.
+              <ls_alv_table>-type = ls_bdc_msgs_3-msgtyp.
+              <ls_alv_table>-id = ls_bdc_msgs_3-msgid.
+              <ls_alv_table>-number = ls_bdc_msgs_3-msgnr.
+              CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+                EXPORTING
+                  msgid               = ls_bdc_msgs_3-msgid
+                  msgnr               = ls_bdc_msgs_3-msgnr
+                  msgv1               = ls_bdc_msgs_3-msgv1
+                  msgv2               = ls_bdc_msgs_3-msgv2
+                  msgv3               = ls_bdc_msgs_3-msgv3
+                  msgv4               = ls_bdc_msgs_3-msgv4
+                IMPORTING
+                  message_text_output = <ls_alv_table>-message.
+            ELSE.
+              <ls_alv_table>-light = '3'.  "Green
+              CLEAR: <ls_alv_table>-type,
+                    <ls_alv_table>-id,
+                    <ls_alv_table>-number,
+                    <ls_alv_table>-message.
+              <ls_alv_table>-message = 'Person Reactivated successfully'.
+
+            ENDIF.
+
+          ENDIF.
+
+
+        WHEN '4'.  "ReOrg & Transfer
+
+
+          CALL FUNCTION 'Z_PERSON_ORG'
+            EXPORTING
+              im_test      = p_tbdc
+              ctu          = 'X'
+              mode         = p_mode
+              update       = 'L'
+*             GROUP        =
+              user         = sy-uname
+*             KEEP         =
+*             HOLDDATE     =
+              nodata       = '/'
+              pernr_001    = lv_pernr_001
+              einda_002    = ls_fm_input-begda "'19.08.2021'
+              selec_04_003 = 'X'
+              begda_004    = ls_fm_input-begda "'19.08.2021'
+              endda_005    = lv_end_date
+              massn_006    = '04'
+              massg_007    = '01'
+              plans_008    = ls_fm_input-plans
+              werks_009    = '0001' "Not used
+              persg_010    = 'C' "Not used
+              persk_011    = '02' "Not used
+              begda_012    = ls_fm_input-begda
+              endda_013    = lv_end_date
+              massn_014    = '04'
+              massg_015    = '01'
+              plans_016    = ls_fm_input-plans
+              werks_017    = '0001' "Not used
+              persg_018    = 'C' "Not used
+              persk_019    = '02'  "Not used
+              begda_020    = ls_fm_input-begda
+              endda_021    = lv_end_date
+              btrtl_022    = ls_fm_input-btrtl
+              abkrs_023    = '99'
+              ansvh_024    = 'AB'
+              plans_025    = ls_fm_input-plans
+              stell_026    = ''
+              orgeh_027    = '50000101' "Not used
+              vdsk1_028    = ls_fm_input-btrtl "'0001'
+            IMPORTING
+              subrc        = lv_bdc_subrc
+            TABLES
+              messtab      = lt_bdc_msgs.
+          .
+          IF lv_bdc_subrc = 0.
+            <ls_alv_table>-light = '3'.  "Green
+            CLEAR: <ls_alv_table>-type,
+                  <ls_alv_table>-id,
+                  <ls_alv_table>-number,
+                  <ls_alv_table>-message.
+
+            <ls_alv_table>-message = 'Person ReOrg Saved successfully'.
+
+          ELSE.
+            <ls_alv_table>-light = '1'.  "Red
+            READ TABLE lt_bdc_msgs INTO DATA(ls_bdc_msgs_4) WITH KEY msgtyp = 'E'.
+            IF sy-subrc = 0.
+              <ls_alv_table>-type = ls_bdc_msgs_4-msgtyp.
+              <ls_alv_table>-id = ls_bdc_msgs_4-msgid.
+              <ls_alv_table>-number = ls_bdc_msgs_4-msgnr.
+              CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+                EXPORTING
+                  msgid               = ls_bdc_msgs_4-msgid
+                  msgnr               = ls_bdc_msgs_4-msgnr
+                  msgv1               = ls_bdc_msgs_4-msgv1
+                  msgv2               = ls_bdc_msgs_4-msgv2
+                  msgv3               = ls_bdc_msgs_4-msgv3
+                  msgv4               = ls_bdc_msgs_4-msgv4
+                IMPORTING
+                  message_text_output = <ls_alv_table>-message.
+            ENDIF.
+
+          ENDIF.
+
+
+        WHEN OTHERS.
+          <ls_alv_table>-light = '1'.  "Red
+          <ls_alv_table>-type = 'E'.
+          <ls_alv_table>-message = 'Please select Action 1 through 4'.
+
+
+      ENDCASE.
+
+      IF lv_bdc_subrc = 0
+        or not line_exists( lt_bdc_msgs[ msgtyp = 'E' ] ).
+
+        COMMIT WORK.
+
+        clear : lv_bdc_subrc.
+        refresh : lt_bdc_msgs.
+
+        DATA: lv_sy_user TYPE bdc_fval.
+        lv_sy_user = sy-uname.
+
+
+        IF <ls_alv_table>-pernr IS NOT INITIAL.
+          DATA(lv_sel_objid) = CONV hrobjid( <ls_alv_table>-plans ).
+          ls_fm_input-pernr = CONV persno( <ls_alv_table>-pernr ).
+
+          SELECT SINGLE objid INTO @DATA(lv_ck_objid)
+            FROM hrp1001
+            WHERE otype = 'S'
+               AND objid = @lv_sel_objid
+               AND plvar = '01'
+               AND rsign = 'A'
+               AND relat = '08'
+               and SCLAS = 'P'
+               and SOBID = @ls_fm_input-pernr.
+*               AND begda >= @<ls_alv_table>-begda.
+          IF sy-subrc NE 0.  "Relation ship not found, create it
+
+            CALL FUNCTION 'Z_PERSON_PO13'
+              EXPORTING
+                ctu             = 'X'
+                mode            = p_mode
+                update          = 'L'
+*               GROUP           =
+                user            = sy-uname
+*               KEEP            =
+*               HOLDDATE        =
+*               NODATA          = '/'
+                plvar_001       = '01'
+                seark_002       = ls_fm_input-plans
+                plvar_003       = '01'
+                seark_004       = ls_fm_input-plans
+                timr6_005       = 'X'
+                begda_006       = ls_fm_input-begda
+                endda_007       = lv_end_date "'12/31/9999'
+                markfeld_02_008 = 'X'
+                begda_009       = ls_fm_input-begda
+                endda_010       = lv_end_date "'12/31/9999'
+                rsign_011       = 'A'
+                relat_012       = '008'
+                sclas_013       = 'P'
+                sobid_014       = ls_fm_input-pernr
+                begda_015       = ls_fm_input-begda
+                endda_016       = lv_end_date "'12/31/9999'
+                rsign_017       = 'A'
+                relat_018       = '008'
+                sclas_019       = 'P'
+                sobid_020       = ls_fm_input-pernr
+                plvar_021       = '01'
+                seark_022       = ls_fm_input-plans
+              IMPORTING
+                subrc           = lv_bdc_subrc
+              TABLES
+                messtab         = lt_bdc_msgs.
+            IF sy-subrc = 0.
+              COMMIT WORK.
+              <ls_alv_table>-message = <ls_alv_table>-message && | { ' : Relationship created ' }|.
+            ENDIF.
+
+          ENDIF.
+        ENDIF.
+
+
+*        CALL FUNCTION 'Z_PERSON_OOPH2'
+*          EXPORTING
+*            ctu       = 'X'
+*            mode      = p_mode
+*            update    = 'L'
+**           GROUP     =
+**           USER      =
+**           KEEP      =
+**           HOLDDATE  =
+**           NODATA    = '/'
+**           PNPTIMR6_001       = 'X'
+**           PNPBEGPS_002       = '01/01/1950'
+**           PNPENDPS_003       = '12/31/9999'
+*            low_004   = lv_pernr_001
+**           LOW_005   = '0'
+**           NEWPLVAR_006       = '01'
+**           STATUS_007         = '1'
+**           RELAT%_008         = '100,00'
+**           OBJECTS_009        = ''
+**           RELATE_010         = 'X'
+**           NUR_INHA_011       = 'X'
+**           KOSTREL_012        = 'O'
+**           CUTINH_0_013       = ''
+**           CUTINH_1_014       = 'X'
+*            group_015 = lv_sy_user
+**           TEST_016  = ''
+*          IMPORTING
+*            subrc     = lv_bdc_subrc
+*          TABLES
+*            messtab   = lt_bdc_msgs.
+*        .
+
+*        CALL FUNCTION 'Z_PERSON_OOPH'
+*          EXPORTING
+*            ctu       = 'X'
+*            mode      = p_mode
+*            update    = 'L'
+**           GROUP     =
+**           USER      =
+**           KEEP      =
+**           HOLDDATE  =
+**           NODATA    = '/'
+**           PNPTIMR1_001       = 'X'
+**           PNPTIMR6_002       = ''
+**           LOW_003   = '0'
+**           NEWPLVAR_004       = '01'
+**           STATUS_005         = '1'
+**           RELAT%_006         = '100,00'
+**           OBJECTS_007        = 'X'
+**           RELATE_008         = 'X'
+**           KOSTREL_009        = 'O'
+**           CUTINH_0_010       = 'X'
+*            group_011 = lv_sy_user
+**           TEST_012  = 'X'
+**           PNPTIMR1_013       = 'X'
+**           PNPTIMR6_014       = ''
+*            low_015   = lv_pernr_001
+**           NEWPLVAR_016       = '01'
+**           OBJECTS_017        = ''
+**           CUTINH_0_018       = ''
+**           CUTINH_1_019       = 'X'
+**           TEST_020  = ''
+*          IMPORTING
+*            subrc     = lv_bdc_subrc
+*          TABLES
+*            messtab   = lt_bdc_msgs.
+*        .
+
+      ENDIF.
+
+    ENDIF.
+
+  ENDLOOP.
+  IF lv_records_processed = abap_false.
+    MESSAGE i000(zperson) WITH 'No valid records to process'.
+  ENDIF.
+
+
+ENDFORM.
+FORM  assign_fields
+  TABLES lt_tdwkey TYPE tt_tdwkey
+    USING ls_header_record.
+
+
+
+  DATA lv_data_line_counter TYPE i VALUE IS INITIAL.
+  LOOP AT lt_tdwkey INTO DATA(lv_data_str).
+
+    APPEND INITIAL LINE TO gt_main_data ASSIGNING FIELD-SYMBOL(<ls_main_data>).
+    APPEND INITIAL LINE TO gt_alv_table ASSIGNING FIELD-SYMBOL(<ls_alv_data>).
+    APPEND INITIAL LINE TO gt_fm_input ASSIGNING FIELD-SYMBOL(<ls_fm_data>).
+
+    <ls_alv_data>-light = '2'. "Yellow.
+
+    lv_data_line_counter = lv_data_line_counter + 1.
+
+    SPLIT ls_header_record AT cl_abap_char_utilities=>horizontal_tab INTO TABLE DATA(lt_field_header).
+    SPLIT lv_data_str-data AT cl_abap_char_utilities=>horizontal_tab INTO TABLE DATA(lt_field_data).
+
+    LOOP AT lt_field_data INTO DATA(ls_source_field_data).
+      DATA(lv_tabix) = sy-tabix.
+
+      DATA(lv_column_name) = to_upper( lt_field_header[ lv_tabix ] ).
+*      replace ALL OCCURRENCES OF space in LV_COLUMN_NAME WITH '_'.
+      IF line_exists( gt_file_stru[ column_nm1 = lv_column_name ] )
+        OR line_exists( gt_file_stru[ column_name = lv_column_name ] ).
+
+        IF line_exists( gt_file_stru[ column_nm1 = lv_column_name ] ).
+          DATA(ls_file_stru) = gt_file_stru[ column_nm1 = lv_column_name ].
+        ELSE.
+          ls_file_stru = gt_file_stru[ column_name = lv_column_name ].
+        ENDIF.
+
+*        DATA(lv_table_name) = gt_file_stru[ column_name = lv_column_name ]-table_name.
+*        DATA(lv_field_name) = gt_file_stru[ column_name = lv_column_name ]-field_name.
+*        DATA(lv_alv_field) = gt_file_stru[ column_name = lv_column_name ]-alv_field.
+*        DATA(lv_data_type) = gt_file_stru[ column_name = lv_column_name ]-data_type.
+
+        DATA(lv_table_name) = ls_file_stru-table_name.
+        DATA(lv_field_name) = ls_file_stru-field_name.
+        DATA(lv_alv_field) = ls_file_stru-alv_field.
+        DATA(lv_data_type) = ls_file_stru-data_type.
+
+
+        DATA(lv_target_field) = '<LS_MAIN_DATA>-' && lv_table_name && '-' && lv_field_name.
+        ASSIGN  (lv_target_field) TO FIELD-SYMBOL(<lv_target_field>).
+        IF sy-subrc = 0.
+          <lv_target_field> = ls_source_field_data.
+        ENDIF.
+
+        DATA(lv_target_alv_field) = '<LS_ALV_DATA>-' && lv_alv_field.
+        ASSIGN  (lv_target_alv_field) TO FIELD-SYMBOL(<lv_alv_field>).
+        IF sy-subrc = 0.
+
+
+
+
+          IF lv_data_type = 'D'.
+            IF ls_source_field_data IS NOT INITIAL.
+
+              DATA: lv_date_external(10) TYPE c.
+              lv_date_external = ls_source_field_data..
+
+              CALL FUNCTION 'CONVERT_DATE_TO_INTERNAL'
+                EXPORTING
+                  date_external            = lv_date_external
+                  accept_initial_date      = abap_true
+                IMPORTING
+                  date_internal            = <lv_alv_field>
+                EXCEPTIONS
+                  date_external_is_invalid = 1
+                  OTHERS                   = 2.
+              IF sy-subrc <> 0.
+                <lv_alv_field> = ls_source_field_data.
+                "generate error message
+              ENDIF.
+            ENDIF.
+          ELSE.
+            <lv_alv_field> = ls_source_field_data.
+
+          ENDIF.
+        ENDIF.
+
+        DATA(lv_target_fm_input) = '<LS_FM_DATA>-' && lv_alv_field.
+        ASSIGN  (lv_target_fm_input) TO FIELD-SYMBOL(<lv_fm_input>).
+        IF sy-subrc = 0.
+          <lv_fm_input> = ls_source_field_data.
+        ENDIF.
+
+
+
+      ENDIF.
+*        IF LINE_EXISTS( LT_MAP_TABLE[ DATA_FIELD = LV_DATA_FIELD ] ).
+*
+*          IF LINE_EXISTS( LT_MAP_TABLE[ COUNTER = LV_DATA_LINE_COUNTER DATA_FIELD = LV_DATA_FIELD ] ).
+*            LT_MAP_TABLE[ COUNTER = LV_DATA_LINE_COUNTER DATA_FIELD = LV_DATA_FIELD ]-DATA_VALUE = LS_FIELD_DATA.
+*          ELSE.
+*
+*            DATA(LS_REFERENCE_MAPPING_RECORD) = LT_MAP_TABLE[ COUNTER = 1 DATA_FIELD = LV_DATA_FIELD ].
+*            LS_REFERENCE_MAPPING_RECORD-COUNTER = LV_DATA_LINE_COUNTER.
+*            LS_REFERENCE_MAPPING_RECORD-DATA_VALUE = LS_FIELD_DATA.
+*            APPEND LS_REFERENCE_MAPPING_RECORD TO LT_MAP_TABLE.
+*
+*          ENDIF.
+*        ENDIF.
+
+    ENDLOOP.
+  ENDLOOP.
+
+  IF lt_tdwkey[] IS INITIAL.
+    APPEND INITIAL LINE TO gt_alv_table ASSIGNING FIELD-SYMBOL(<ls_alv_data_empty>).
+
+  ENDIF.
+
+  LOOP AT gt_alv_table ASSIGNING FIELD-SYMBOL(<ls_alv_format>).
+    IF <ls_alv_format>-action IS NOT INITIAL.
+      CASE <ls_alv_format>-action(1).
+        WHEN '1'.
+          <ls_alv_format>-action =  '1 Add & Activate Person'.
+        WHEN '2'.
+          <ls_alv_format>-action =  '2 De-Activation'.
+        WHEN '3'.
+          <ls_alv_format>-action =  '3 Re-Activate Person'.
+        WHEN '4'.
+          <ls_alv_format>-action =   '4 Organization Reassignment'.
+        WHEN OTHERS.
+          <ls_alv_format>-action =  '1 Add & Activate Person'.
+      ENDCASE.
+    ELSE.
+      <ls_alv_format>-action =  '1 Add & Activate Person'.
+
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.
+
+*FORM fill_bapi_structure USING  bapi_parameter parameter_type.
+*
+*  DATA(lt_bapi_field_list) = CAST cl_abap_structdescr(
+*    cl_abap_typedescr=>describe_by_name( parameter_type ) )->components .
+*
+*  LOOP AT lt_bapi_field_list INTO DATA(ls_bapi_field).
+*    DATA(lv_field_name) = to_upper( 'ls_' && bapi_parameter && '-' && ls_bapi_field-name ).
+*    DATA(lv_bapi_field_name) = to_upper( bapi_parameter && '-' && ls_bapi_field-name ).
+*    ASSIGN (lv_field_name) TO FIELD-SYMBOL(<field_name>).
+*    IF line_exists( lt_map_table[ counter = 1 bapi_field = lv_bapi_field_name ] ).
+**
+*      CASE ls_bapi_field-type_kind.
+*        WHEN  'D'.
+*
+*          DATA: lv_input_value TYPE sy-datum.
+*          DATA: lv_date_external(10) TYPE c.
+*          lv_input_value = lt_map_table[ counter = 1 bapi_field = lv_bapi_field_name ]-data_value.
+*
+*          CALL FUNCTION 'CONVERT_DATE_TO_EXTERNAL'
+*            EXPORTING
+*              date_internal            = lv_input_value
+*            IMPORTING
+*              date_external            = lv_date_external
+*            EXCEPTIONS
+*              date_internal_is_invalid = 1
+*              OTHERS                   = 2.
+*          IF sy-subrc <> 0.
+*            <field_name> = lv_input_value.
+*            "generate error message
+*          ELSE.
+*            CALL FUNCTION 'CONVERT_DATE_TO_INTERNAL'
+*              EXPORTING
+*                date_external            = lv_date_external
+*                accept_initial_date      = abap_true
+*              IMPORTING
+*                date_internal            = <field_name>
+*              EXCEPTIONS
+*                date_external_is_invalid = 1
+*                OTHERS                   = 2.
+*            IF sy-subrc <> 0.
+*              <field_name> = lv_input_value.
+*              "generate error message
+*            ENDIF.
+*          ENDIF.
+*        WHEN OTHERS.
+*          <field_name> = lt_map_table[ counter = 1 bapi_field = lv_bapi_field_name ]-data_value.
+*      ENDCASE.
+*    ENDIF.
+*  ENDLOOP.
+*
+*ENDFORM.
+*
+*
+*FORM fill_bapi_table
+*  TABLES lt_data_table TYPE tt_tdwkey
+*          lt_bapi_table
+*  USING  bapi_parameter
+*        parameter_type.
+*
+*  LOOP AT lt_data_table INTO DATA(ls_data_table).
+*    DATA(lv_data_line_index) = sy-tabix.
+*
+*    APPEND INITIAL LINE TO lt_bapi_table ASSIGNING FIELD-SYMBOL(<ls_bapi_table_structure>).
+*    DATA(lv_bapi_table_index) = sy-tabix.
+*    DATA(lv_data_present) = abap_false.
+*
+**-- retrive fieldnames using parameter type
+*    DATA(lt_bapi_field_list) = CAST cl_abap_structdescr(
+*      cl_abap_typedescr=>describe_by_name( parameter_type ) )->components .
+*
+**-- Loop at fieldlist and assign values from mapping table
+*    LOOP AT lt_bapi_field_list INTO DATA(ls_bapi_field).
+*      DATA(lv_field_name) = '<ls_bapi_table_structure>-' && ls_bapi_field-name.
+*      DATA(lv_bapi_field_name) = to_upper( bapi_parameter && '-' && ls_bapi_field-name ).
+*      ASSIGN (lv_field_name) TO FIELD-SYMBOL(<field_name>).
+*      IF line_exists( lt_map_table[ counter = lv_data_line_index bapi_field = lv_bapi_field_name ] ).
+*
+*        CASE ls_bapi_field-type_kind.
+*          WHEN  'D'.
+*
+*            DATA: lv_input_value TYPE sy-datum.
+*            DATA: lv_date_external(10) TYPE c.
+*            lv_input_value = lt_map_table[ counter = lv_data_line_index bapi_field = lv_bapi_field_name ]-data_value.
+*
+*            CALL FUNCTION 'CONVERT_DATE_TO_EXTERNAL'
+*              EXPORTING
+*                date_internal            = lv_input_value
+*              IMPORTING
+*                date_external            = lv_date_external
+*              EXCEPTIONS
+*                date_internal_is_invalid = 1
+*                OTHERS                   = 2.
+*            IF sy-subrc <> 0.
+*              <field_name> = lv_input_value.
+*              "generate error message
+*            ELSE.
+*              CALL FUNCTION 'CONVERT_DATE_TO_INTERNAL'
+*                EXPORTING
+*                  date_external            = lv_date_external
+*                  accept_initial_date      = abap_true
+*                IMPORTING
+*                  date_internal            = <field_name>
+*                EXCEPTIONS
+*                  date_external_is_invalid = 1
+*                  OTHERS                   = 2.
+*              IF sy-subrc <> 0.
+*                <field_name> = lv_input_value.
+*                "generate error message
+*              ENDIF.
+*            ENDIF.
+*          WHEN OTHERS.
+*            <field_name> = lt_map_table[ counter = lv_data_line_index  bapi_field = lv_bapi_field_name ]-data_value.
+*
+*        ENDCASE.
+*
+*        IF <field_name> IS NOT INITIAL
+*          AND <field_name> <> ''
+*          AND <field_name> <> '00000000'.
+*          lv_data_present = abap_true.
+*        ENDIF.
+*      ENDIF.
+*    ENDLOOP.
+*
+*    IF <ls_bapi_table_structure> IS INITIAL
+*      OR lv_data_present = abap_false.
+*      DELETE lt_bapi_table INDEX lv_bapi_table_index.
+*    ENDIF.
+*
+*  ENDLOOP.
+*ENDFORM.
+
+
+*FORM build_field_catalog CHANGING lt_fieldcat  TYPE slis_t_fieldcat_alv. "LVC_T_FCAT.
+*
+*  DATA: lv_col_pos TYPE i.
+*  lv_col_pos  =  1.
+*
+*  REFRESH: lt_fieldcat.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_light>).
+*  <ls_fieldcat_light>-reptext_ddic = 'Status'.
+*  <ls_fieldcat_light>-fieldname = 'LIGHT'.
+*  <ls_fieldcat_light>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_light>-outputlen = '4'.
+*  <ls_fieldcat_light>-icon = 'X'.
+*  <ls_fieldcat_light>-col_pos = lv_col_pos.
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_aa>).
+*  <ls_fieldcat_aa>-reptext_ddic = 'ACTION'.
+*  <ls_fieldcat_aa>-fieldname = 'ACTION'.
+*  <ls_fieldcat_aa>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_aa>-outputlen = '5'.
+*  <ls_fieldcat_aa>-key = abap_false.
+*  <ls_fieldcat_aa>-edit = g_edit.
+*  <ls_fieldcat_aa>-col_pos = lv_col_pos.
+*
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_ssn>).
+*  <ls_fieldcat_ssn>-reptext_ddic = 'SSN'.
+*  <ls_fieldcat_ssn>-fieldname = 'PERID'.
+*  <ls_fieldcat_ssn>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_ssn>-outputlen = '10'.
+*  <ls_fieldcat_ssn>-key = abap_false.
+*  <ls_fieldcat_ssn>-edit = g_edit.
+*  <ls_fieldcat_ssn>-col_pos = lv_col_pos.
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_cacid>).
+*  <ls_fieldcat_cacid>-reptext_ddic = 'CAC ID'.
+*  <ls_fieldcat_cacid>-fieldname = 'CACID'.
+*  <ls_fieldcat_cacid>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_cacid>-outputlen = '10'.
+*  <ls_fieldcat_cacid>-key = abap_false.
+*  <ls_fieldcat_cacid>-edit = g_edit. "ABAP_TRUE.
+*  <ls_fieldcat_cacid>-edit = g_edit.
+*  <ls_fieldcat_cacid>-col_pos = lv_col_pos.
+*
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_auid>).
+*  <ls_fieldcat_auid>-reptext_ddic = 'AUID'.
+*  <ls_fieldcat_auid>-fieldname = 'AUID'.
+*  <ls_fieldcat_auid>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_auid>-outputlen = '10'.
+*  <ls_fieldcat_auid>-key = abap_false.
+*  <ls_fieldcat_auid>-edit = g_edit. "ABAP_TRUE.
+*  <ls_fieldcat_auid>-col_pos = lv_col_pos.
+*
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_fn>).
+*  <ls_fieldcat_fn>-reptext_ddic = 'FIRST NAME'.
+*  <ls_fieldcat_fn>-fieldname = 'VORNA'.
+*  <ls_fieldcat_fn>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_fn>-outputlen = '20'.
+*  <ls_fieldcat_fn>-key = abap_false.
+*  <ls_fieldcat_fn>-col_pos = lv_col_pos.
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_last>).
+*  <ls_fieldcat_last>-reptext_ddic = 'LAST NAME'.
+*  <ls_fieldcat_last>-fieldname = 'NACHN'.
+*  <ls_fieldcat_last>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_last>-outputlen = '20'.
+*  <ls_fieldcat_last>-key = abap_false.
+*  <ls_fieldcat_last>-col_pos = lv_col_pos.
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_dob>).
+*  <ls_fieldcat_dob>-reptext_ddic = 'DATE OF BIRTH'.
+*  <ls_fieldcat_dob>-fieldname = 'GBDAT'.
+*  <ls_fieldcat_dob>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_dob>-outputlen = '20'.
+*  <ls_fieldcat_dob>-key = abap_false.
+*  <ls_fieldcat_dob>-col_pos = lv_col_pos.
+*
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_posid>).
+*  <ls_fieldcat_posid>-reptext_ddic = 'POSITION ID'.
+*  <ls_fieldcat_posid>-fieldname = 'PLANS'.
+*  <ls_fieldcat_posid>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_posid>-ref_tabname = 'PA0001'.
+*  <ls_fieldcat_posid>-ref_fieldname = 'PLANS'.
+*  <ls_fieldcat_posid>-outputlen = '10'.
+*  <ls_fieldcat_posid>-key = abap_false.
+*  <ls_fieldcat_posid>-edit = g_edit. "ABAP_TRUE.
+**  <LS_FIELDCAT_POSID>-DATATYPE = 'PLANS'.
+*  <ls_fieldcat_posid>-col_pos = lv_col_pos.
+*
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_spr>).
+*  <ls_fieldcat_spr>-reptext_ddic = 'SERVICE RANK PAYGRADE'.
+*  <ls_fieldcat_spr>-seltext_l = 'SERVICE RANK PAYGRADE'.
+*  <ls_fieldcat_spr>-fieldname = 'ANSVH'.
+*  <ls_fieldcat_spr>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_spr>-outputlen = '10'.
+*  <ls_fieldcat_spr>-ref_tabname = 'PA0001'.
+*  <ls_fieldcat_spr>-ref_fieldname = 'ANSVH'.
+*  <ls_fieldcat_spr>-key = abap_false.
+*  <ls_fieldcat_spr>-edit = g_edit. "ABAP_TRUE.
+*  <ls_fieldcat_spr>-col_pos = lv_col_pos.
+*
+*
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_edt>).
+*  <ls_fieldcat_edt>-reptext_ddic = 'EFFECTIVE DATE'.
+*  <ls_fieldcat_edt>-fieldname = 'BEGDA'.
+*  <ls_fieldcat_edt>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_edt>-outputlen = '10'.
+*  <ls_fieldcat_edt>-key = abap_false.
+*  <ls_fieldcat_edt>-edit = g_edit. "ABAP_TRUE.
+*  <ls_fieldcat_edt>-col_pos = lv_col_pos.
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_email>).
+*  <ls_fieldcat_email>-reptext_ddic = 'EMAIL'.
+*  <ls_fieldcat_email>-fieldname = 'EMAIL'.
+*  <ls_fieldcat_email>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_email>-outputlen = '20'.
+*  <ls_fieldcat_email>-key = abap_false.
+*  <ls_fieldcat_email>-edit = g_edit. "ABAP_TRUE.
+*  <ls_fieldcat_email>-col_pos = lv_col_pos.
+*
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_pernr>).
+*  <ls_fieldcat_pernr>-reptext_ddic = 'PERNR'.
+*  <ls_fieldcat_pernr>-fieldname = 'PERNR'.
+*  <ls_fieldcat_pernr>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_pernr>-outputlen = '10'.
+*  <ls_fieldcat_pernr>-key = abap_true.
+*  <ls_fieldcat_pernr>-col_pos = lv_col_pos.
+*
+**--- Message --------
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_type>).
+*  <ls_fieldcat_type>-reptext_ddic = 'Type'.
+*  <ls_fieldcat_type>-fieldname = 'TYPE'.
+*  <ls_fieldcat_type>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_type>-outputlen = '4'.
+*  <ls_fieldcat_type>-col_pos = lv_col_pos.
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_mid>).
+*  <ls_fieldcat_mid>-reptext_ddic = 'Message Id'.
+*  <ls_fieldcat_mid>-fieldname = 'ID'.
+*  <ls_fieldcat_mid>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_mid>-outputlen = '10'.
+*  <ls_fieldcat_mid>-col_pos = lv_col_pos.
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_no>).
+*  <ls_fieldcat_no>-reptext_ddic = 'Number'.
+*  <ls_fieldcat_no>-fieldname = 'NUMBER'.
+*  <ls_fieldcat_no>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_no>-outputlen = '6'.
+*  <ls_fieldcat_no>-col_pos = lv_col_pos.
+*
+*  lv_col_pos = lv_col_pos + 1.
+*  APPEND INITIAL LINE TO lt_fieldcat ASSIGNING FIELD-SYMBOL(<ls_fieldcat_msg>).
+*  <ls_fieldcat_msg>-reptext_ddic = 'Message'.
+*  <ls_fieldcat_msg>-fieldname = 'MESSAGE'.
+*  <ls_fieldcat_msg>-tabname = 'GT_ALV_TABLE'.
+*  <ls_fieldcat_msg>-outputlen = '220'.
+*  <ls_fieldcat_msg>-col_pos = lv_col_pos.
+*
+*
+*
+**  LV_COL_POS = LV_COL_POS + 1.
+**  APPEND INITIAL LINE TO LT_FIELDCAT ASSIGNING FIELD-SYMBOL(<LS_FIELDCAT_RSN>).
+**  <LS_FIELDCAT_RSN>-REPTEXT_DDIC = 'REASON'.
+**  <LS_FIELDCAT_RSN>-FIELDNAME = 'MASSG'.
+**  <LS_FIELDCAT_RSN>-TABNAME = 'GT_ALV_TABLE'.
+**  <LS_FIELDCAT_RSN>-OUTPUTLEN = '10'.
+**  <LS_FIELDCAT_RSN>-KEY = ABAP_FALSE.
+**  <LS_FIELDCAT_RSN>-COL_POS = LV_COL_POS.
+*
+*
+**  LV_COL_POS = LV_COL_POS + 1.
+**  APPEND INITIAL LINE TO LT_FIELDCAT ASSIGNING FIELD-SYMBOL(<LS_FIELDCAT_STRT>).
+**  <LS_FIELDCAT_STRT>-REPTEXT_DDIC = 'STREET AND HOUSE NO'.
+**  <LS_FIELDCAT_STRT>-FIELDNAME = 'STRAS'.
+**  <LS_FIELDCAT_STRT>-TABNAME = 'GT_ALV_TABLE'.
+**  <LS_FIELDCAT_STRT>-OUTPUTLEN = '10'.
+**  <LS_FIELDCAT_STRT>-KEY = ABAP_FALSE.
+**  <LS_FIELDCAT_STRT>-COL_POS = LV_COL_POS.
+**
+**  LV_COL_POS = LV_COL_POS + 1.
+**  APPEND INITIAL LINE TO LT_FIELDCAT ASSIGNING FIELD-SYMBOL(<LS_FIELDCAT_CTY>).
+**  <LS_FIELDCAT_CTY>-REPTEXT_DDIC = 'CITY'.
+**  <LS_FIELDCAT_CTY>-FIELDNAME = 'ORT01'.
+**  <LS_FIELDCAT_CTY>-TABNAME = 'GT_ALV_TABLE'.
+**  <LS_FIELDCAT_CTY>-OUTPUTLEN = '10'.
+**  <LS_FIELDCAT_CTY>-KEY = ABAP_FALSE.
+**  <LS_FIELDCAT_CTY>-COL_POS = LV_COL_POS.
+**
+**
+**  LV_COL_POS = LV_COL_POS + 1.
+**  APPEND INITIAL LINE TO LT_FIELDCAT ASSIGNING FIELD-SYMBOL(<LS_FIELDCAT_STT>).
+**  <LS_FIELDCAT_STT>-REPTEXT_DDIC = 'STATE'.
+**  <LS_FIELDCAT_STT>-FIELDNAME = 'STATE'.
+**  <LS_FIELDCAT_STT>-TABNAME = 'GT_ALV_TABLE'.
+**  <LS_FIELDCAT_STT>-OUTPUTLEN = '10'.
+**  <LS_FIELDCAT_STT>-KEY = ABAP_FALSE.
+**  <LS_FIELDCAT_STT>-COL_POS = LV_COL_POS.
+**
+**
+**
+**  LV_COL_POS = LV_COL_POS + 1.
+**  APPEND INITIAL LINE TO LT_FIELDCAT ASSIGNING FIELD-SYMBOL(<LS_FIELDCAT_POCD>).
+**  <LS_FIELDCAT_POCD>-REPTEXT_DDIC = 'POSTAL CODE'.
+**  <LS_FIELDCAT_POCD>-FIELDNAME = 'PSTLZ'.
+**  <LS_FIELDCAT_POCD>-TABNAME = 'GT_ALV_TABLE'.
+**  <LS_FIELDCAT_POCD>-OUTPUTLEN = '10'.
+**  <LS_FIELDCAT_POCD>-KEY = ABAP_FALSE.
+**  <LS_FIELDCAT_POCD>-COL_POS = LV_COL_POS.
+**
+**
+**  LV_COL_POS = LV_COL_POS + 1.
+**  APPEND INITIAL LINE TO LT_FIELDCAT ASSIGNING FIELD-SYMBOL(<LS_FIELDCAT_CTRY>).
+**  <LS_FIELDCAT_CTRY>-REPTEXT_DDIC = 'COUNTRY'.
+**  <LS_FIELDCAT_CTRY>-FIELDNAME = 'LAND1'.
+**  <LS_FIELDCAT_CTRY>-TABNAME = 'GT_ALV_TABLE'.
+**  <LS_FIELDCAT_CTRY>-OUTPUTLEN = '10'.
+**  <LS_FIELDCAT_CTRY>-KEY = ABAP_FALSE.
+**  <LS_FIELDCAT_CTRY>-COL_POS = LV_COL_POS.
+*
+*
+*
+*
+*
+*
+*ENDFORM. "build_field_catalog
+
+
+
+*FORM display_alv_output.
+*  DATA: lt_events TYPE  slis_t_event.
+*
+*  DATA: ls_layout TYPE slis_layout_alv.
+*  ls_layout-coltab_fieldname = 'TCOLOR'.
+*  ls_layout-info_fieldname = 'COLOR_LINE'.
+*  ls_layout-zebra = abap_true.
+*  ls_layout-lights_fieldname = 'LIGHT'.
+*  ls_layout-colwidth_optimize = abap_true.
+*
+*
+**data: lt_f4 type lvc_t_f4.
+**APPEND INITIAL LINE TO lt_f4 ASSIGNING FIELD-SYMBOL(<ls_f4>).
+**<ls_f4>-fieldname = 'GT_ALV_TABLE-PLANS'.
+**<ls_f4>-register = 'X'.
+*
+*  PERFORM build_field_catalog CHANGING lt_fieldcat.
+*
+*  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+*    EXPORTING
+*      i_callback_program       = sy-repid
+**     i_structure_name         = 'LS_ALV_TABLE'
+*      i_callback_pf_status_set = 'STATUS'
+*      i_callback_user_command  = 'USER_COMMAND'
+*      is_layout                = ls_layout
+*      it_fieldcat              = lt_fieldcat
+*      it_events                = lt_events
+*    TABLES
+*      t_outtab                 = gt_alv_table.
+*ENDFORM.
+
+
+FORM status USING p_extab TYPE slis_t_extab.
+*Pf status
+  SET PF-STATUS 'STANDARD_FULLSCREEN'.
+ENDFORM. " STATUS
+
+FORM read_file TABLES lt_tdwkey TYPE tt_tdwkey
+               USING file_name
+               CHANGING  ls_header_record.
+
+  CHECK file_name IS NOT INITIAL.
+
+  DATA lv_filename TYPE string.
+  lv_filename = file_name.
+  DATA: lt_table TYPE TABLE OF string.
+
+  CALL METHOD cl_gui_frontend_services=>gui_upload
+    EXPORTING
+      filename                = lv_filename
+*     filetype                = 'ASC'
+*     has_field_separator     = SPACE
+*     header_length           = 0
+*     read_by_line            = 'X'
+*     dat_mode                = SPACE
+*     codepage                = SPACE
+*     ignore_cerr             = ABAP_TRUE
+*     replacement             = '#'
+*     virus_scan_profile      =
+*  IMPORTING
+*     filelength              =
+*     header                  =
+    CHANGING
+      data_tab                = lt_table[]
+*     isscanperformed         = SPACE
+    EXCEPTIONS
+      file_open_error         = 1
+      file_read_error         = 2
+      no_batch                = 3
+      gui_refuse_filetransfer = 4
+      invalid_type            = 5
+      no_authority            = 6
+      unknown_error           = 7
+      bad_data_format         = 8
+      header_not_allowed      = 9
+      separator_not_allowed   = 10
+      header_too_long         = 11
+      unknown_dp_error        = 12
+      access_denied           = 13
+      dp_out_of_memory        = 14
+      disk_full               = 15
+      dp_timeout              = 16
+      not_supported_by_gui    = 17
+      error_no_gui            = 18
+      OTHERS                  = 19.
+  IF sy-subrc <> 0.
+* Implement suitable error handling here
+  ENDIF.
+
+*-- To get data from excel file
+*ALSM_EXCEL_TO_INTERNAL_TABLE
+
+
+  CLEAR ls_header_record.
+  IF lt_table[] IS NOT INITIAL.
+    LOOP AT lt_table INTO ls_header_record.
+      DATA(lv_tabix) = sy-tabix.
+      ls_header_record = to_upper( ls_header_record ).
+      SPLIT ls_header_record AT cl_abap_char_utilities=>horizontal_tab INTO TABLE DATA(lt_header_fields).
+      IF lt_header_fields IS NOT INITIAL.
+        DATA(lv_header_field) = lt_header_fields[ 1 ].
+        IF NOT ( line_exists( gt_file_stru[ column_nm1 = lv_header_field ] )
+            OR line_exists( gt_file_stru[ column_name = lv_header_field ] ) ).
+
+          DELETE  lt_table INDEX lv_tabix..
+          CLEAR ls_header_record.
+        ELSE.
+          DELETE  lt_table INDEX lv_tabix..
+          EXIT.
+        ENDIF.
+      ELSE.
+        "Delete blank header lines
+        DELETE  lt_table INDEX lv_tabix..
+        CLEAR ls_header_record.
+
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+  IF ls_header_record IS INITIAL.
+    MESSAGE  'Upload file does not have header record ' TYPE 'A'.
+*    MESSAGE  |{ 'Upload file has invalid colum name' } | && ls_header_fields TYPE 'A'.
+    LEAVE TO SCREEN 0.
+  ENDIF.
+*    LOOP AT lt_header_fields INTO DATA(ls_header_fields).
+*      IF NOT line_exists( gt_file_stru[ column_nm1 = ls_header_fields ] )
+*          or line_exists( gt_file_stru[ column_name = ls_header_fields ] ).
+**        Message S000(ZPERSON_MAINTAIN) with 'Upload file has invalid colum name' ls_header_fields.
+*        MESSAGE  |{ 'Upload file has invalid colum name' } | && ls_header_fields TYPE 'A'.
+**        LEAVE to SCREEN 0.
+*      ENDIF.
+*    ENDLOOP.
+*    DELETE  lt_table INDEX 1.
+
+
+  DATA ls_data TYPE string.
+  LOOP AT lt_table INTO ls_data.
+
+    IF ls_data CN cl_abap_char_utilities=>horizontal_tab.
+      SPLIT ls_data AT cl_abap_char_utilities=>horizontal_tab INTO TABLE DATA(lt_field_tdwkey).
+      APPEND INITIAL LINE TO lt_tdwkey ASSIGNING FIELD-SYMBOL(<ls_tbwkey>).
+      <ls_tbwkey>-data = ls_data.
+      <ls_tbwkey>-perid = lt_field_tdwkey[ 1 ].
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.
+
+FORM refresh_bapi_parameters.
+
+
+  lt_map_table = VALUE #(
+  ( counter = 1  bapi_field = 'LV_START_DATE' data_field = ''  data_value = '' )
+   ).
+
+ENDFORM.
+
+
+FORM read_files.
+
+  PERFORM read_file TABLES gt_tdwkey USING p_file01  CHANGING  gs_header_record.
+
+ENDFORM.
+
+FORM process_files.
+
+  REFRESH : gt_main_data.
+  REFRESH: gt_alv_table.
+  REFRESH: gt_fm_input.
+
+  IF p_test IS NOT INITIAL.
+    CLEAR g_edit.
+  ELSE.
+    g_edit = abap_true.
+  ENDIF.
+
+  PERFORM assign_fields TABLES gt_tdwkey  USING  gs_header_record.
+
+  IF p_test IS NOT INITIAL.
+    CALL SCREEN 100.
+*    PERFORM DISPLAY_ALV_OUTPUT.
+  ENDIF.
+ENDFORM.
+
+
+FORM value_help_posid USING
+    e_fieldname     TYPE lvc_fname
+    es_row_no       TYPE lvc_s_roid.
+
+
+  . " USING f4_params TYPE onf4_event_parameters_type.
+  DATA: ls_objec TYPE objec.
+
+  CALL FUNCTION 'RH_OBJID_REQUEST'
+    EXPORTING
+      plvar           = '01'
+      otype           = 'S'
+      dynpro_repid    = sy-repid
+      dynpro_dynnr    = '100'
+*     dynpro_searkfield = 'PSPAR-PLANS'
+    IMPORTING
+      sel_object      = ls_objec
+    EXCEPTIONS
+      cancelled       = 1
+      wrong_condition = 2
+      nothing_found   = 3
+*     illegal_mode    = 4                "XMKAL0K093206
+      internal_error  = 5
+      OTHERS          = 6.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+  IF ls_objec IS NOT INITIAL.
+    READ TABLE gt_alv_table ASSIGNING FIELD-SYMBOL(<ls_alv_line_f4_posid>)
+      INDEX  es_row_no-row_id.
+    IF sy-subrc = 0.
+      <ls_alv_line_f4_posid>-plans = ls_objec-realo.
+    ENDIF.
+
+  ENDIF.
+*    MOVE ls_OBJEC-realo TO pspar-plans.
+ENDFORM.
+
+FORM value_request_ansvh USING
+                  es_row_no     TYPE lvc_s_roid
+                  er_event_data TYPE REF TO cl_alv_event_data
+.
+
+  TYPES: BEGIN OF ty_ls_ansvh,
+           ansvh TYPE ansvh,
+           ptext TYPE anstx,
+         END OF ty_ls_ansvh.
+  TYPES ty_lt_ansvh TYPE STANDARD TABLE OF ty_ls_ansvh.
+
+  DATA lt_return_tab    TYPE TABLE OF ddshretval.
+*  DATA ls_return        TYPE ddshretval.
+  DATA lv_disp_flag     TYPE ddbool_d.
+  DATA lv_persa         TYPE persa.
+  DATA lv_molga         TYPE molga.
+  DATA lv_pernr         TYPE pernr_d.
+
+  DATA ls_t542t         TYPE t542t.
+  DATA lv_ansvh         TYPE ansvh.
+
+  DATA lt_ansvh TYPE ty_lt_ansvh.
+
+  FIELD-SYMBOLS <ls_ansvh> TYPE ty_ls_ansvh.
+
+*  IF cl_hrpad_t77s0_admin_ansvh=>is_active = abap_false.
+* switch DELIM ANSVH not active - process drop down list
+* get MOLGA
+  lv_molga = '10'. "t001p-molga.
+
+* Data for dropdown listbox - only ANSVH and TEXT
+  SELECT ansvh FROM t542a INTO CORRESPONDING FIELDS OF TABLE lt_ansvh
+                                    WHERE molga = lv_molga.
+  LOOP AT lt_ansvh ASSIGNING <ls_ansvh>.
+    CALL METHOD cl_hr_t542t=>read
+      EXPORTING
+        spras = sy-langu
+        molga = lv_molga
+        ansvh = <ls_ansvh>-ansvh
+      RECEIVING
+        t542t = ls_t542t.
+    <ls_ansvh>-ptext = ls_t542t-atx.
+  ENDLOOP.
+
+  SORT lt_ansvh BY ptext ASCENDING.                         "ZRA2711454
+
+  CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+    EXPORTING
+      retfield        = 'ANSVH'
+      dynpprog        = sy-repid
+      dynpnr          = sy-dynnr
+      value_org       = 'S'
+    TABLES
+      value_tab       = lt_ansvh
+      return_tab      = lt_return_tab
+    EXCEPTIONS
+      parameter_error = 1
+      no_values_found = 2
+      OTHERS          = 3.
+
+
+  FIELD-SYMBOLS: <itab> TYPE lvc_t_modi.
+  DATA: ls_modi TYPE lvc_s_modi.
+  ASSIGN er_event_data->m_data->* TO <itab>.
+
+  READ TABLE lt_return_tab INTO DATA(ls_return) INDEX 1.
+  IF sy-subrc = 0.
+    ls_modi-row_id    = es_row_no-row_id.
+    ls_modi-fieldname = 'ANSVH'.
+    ls_modi-value     = ls_return-fieldval.
+    APPEND ls_modi TO <itab>.
+  ENDIF.
+
+
+*  ELSE.
+** switch DELIM ANSVH active - read t542a_delim
+*    CALL FUNCTION 'F4IF_FIELD_VALUE_REQUEST'
+*      EXPORTING
+*        tabname     = 'P0001'
+*        fieldname   = 'ANSVH'
+*        dynpprog    = sy-repid
+*        dynprofield = 'P0001-ANSVH'
+*        dynpnr      = sy-dynnr
+*      TABLES
+*        return_tab  = lt_return_tab
+*      EXCEPTIONS
+*        OTHERS      = 5.
+*
+** note 2688026 - do not clear atx
+*    IF NOT lt_return_tab IS INITIAL.
+** get MOLGA if necessary - for retrieving correct entry in t542t
+*      IF lv_molga IS INITIAL.
+*        lv_molga = t001p-molga.
+*      ENDIF.
+*
+*      READ TABLE lt_return_tab INTO ls_return INDEX 1.
+*      lv_ansvh = ls_return-fieldval.
+*
+*      CALL METHOD cl_hr_t542t=>read
+*        EXPORTING
+*          spras = sy-langu
+*          molga = lv_molga
+*          ansvh = lv_ansvh
+*        RECEIVING
+*          t542t = ls_t542t.
+*
+*      t542t-atx   = ls_t542t-atx.
+*      p0001-ansvh = ls_t542t-ansvh.
+*
+*    ENDIF. "note 2688026
+*
+*  ENDIF.
+
+ENDFORM.
+
+
+FORM get_subarea USING
+      i_plans TYPE plans
+      CHANGING l_btrtl TYPE  btrtl.
+
+
+  DATA: l_persa LIKE p0001-werks.
+  DATA: l_bukrs LIKE p0001-bukrs.
+  DATA: l_gsber LIKE p0001-gsber.
+  CLEAR: l_persa, l_btrtl, l_bukrs, l_gsber.
+*  CLEAR l_changed.                     "XFYP30K134386
+  CALL FUNCTION 'RH_GET_CONTROLLING_INFO'                "XFYPH9K003112
+    EXPORTING
+      plvar                = cl_hrpiq00const=>c_plvar_active
+      otype                = 'S'            "Planstelle/position
+      objid                = i_plans
+*     sel_date             = pspar-begda                      "XFYPH9K003627
+      sel_date             = sy-datum    "XFYPH9K003627
+      status               = '1'
+      read_not_t77s0       = 'X'       "XFYP30K142479
+      iv_check_inheritance = 'X'
+    IMPORTING
+*     kokrs                =
+      bukrs                = l_bukrs
+      gsber                = l_gsber
+      persa                = l_persa
+      btrtl                = l_btrtl
+    EXCEPTIONS
+      not_found            = 1
+      OTHERS               = 2.
+
+  IF sy-subrc NE 0.                    "XFYAHRK033360
+    CLEAR: l_bukrs, l_gsber, l_persa, l_btrtl.           "XFYAHRK033360
+  ENDIF.                               "XFYAHRK033360
+ENDFORM.                               " PD_READ_1008
+
+FORM download_template.
+
+  DATA lv_file TYPE string.
+  DATA lv_path TYPE string.
+  DATA lv_dummy TYPE string.
+  DATA lt_texttab TYPE truxs_t_text_data.
+
+  APPEND INITIAL LINE TO lt_texttab ASSIGNING FIELD-SYMBOL(<ls_texttab1>).
+
+  CONCATENATE
+'Required '
+'Required '
+'Optional'
+'Required '
+'Required '
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+'Required'
+  INTO <ls_texttab1> SEPARATED BY ','."cl_abap_char_utilities=>horizontal_tab.
+
+
+  APPEND INITIAL LINE TO lt_texttab ASSIGNING FIELD-SYMBOL(<ls_texttab2>).
+
+  CONCATENATE
+'SSN of Person'
+'CAC ID / DOD ID / EIDP ID'
+'AU ID'
+'Last Name'
+'First Name'
+'DOB'
+'Gender'
+'Email Address'
+'College'
+'School'
+'Main Type of Person'
+'Secondary type of Person'
+'Start Date'
+'Position'
+'Home Address number and Street'
+'Home Address City'
+'Home Address State'
+'Home Address Zip Code'
+'Duty Station number and Street'
+'Duty Station  City'
+'Duty Station  State'
+'Duty Station  Zip Code'
+  INTO <ls_texttab2> SEPARATED BY ','."cl_abap_char_utilities=>horizontal_tab.
+
+
+*  CONCATENATE
+*  'ACTION'
+*  'CAC_ID'
+*  'SSN'
+*  'LAST_NAME'
+*  'AUID'
+*  'EFFECTIVE_DATE'
+*  'FIRST_NAME'
+*  'DATE_OF_BIRTH'
+*  'POSITION_ID'
+*  'SERVICE_RANK_PAYGRADE'
+*  'EMAIL'
+*  'STREET_AND_HOUSE_NO'
+*  'CITY'
+*  'STATE'
+*  'POSTAL_CODE'
+*  'COUNTRY'
+*  'STREET_AND_HOUSE_NO2'
+*  'CITY2'
+*  'STATE2'
+*  'POSTAL_CODE2'
+*  'COUNTRY2'
+*  INTO <ls_texttab> SEPARATED BY ','."cl_abap_char_utilities=>horizontal_tab.
+
+
+
+
+
+
+  cl_gui_frontend_services=>file_save_dialog(
+    EXPORTING
+      default_extension         =   'csv'
+    CHANGING
+      filename                  =   lv_dummy
+      path                      =   lv_path
+      fullpath                  =  lv_file
+    EXCEPTIONS
+      cntl_error                = 1
+      error_no_gui              = 2
+      not_supported_by_gui      = 3
+      invalid_default_file_name = 4
+      OTHERS                    = 5
+    ).
+  IF sy-subrc <> 0.
+  ENDIF.
+
+
+  CHECK lv_file IS NOT INITIAL.
+  cl_gui_frontend_services=>gui_download( EXPORTING append = abap_false
+                                                    filename = lv_file
+                                                    filetype = 'ASC'
+                                          CHANGING data_tab = lt_texttab
+                                          EXCEPTIONS OTHERS = 1 ).
+
+
+ENDFORM.
