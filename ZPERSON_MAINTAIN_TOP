@@ -1,0 +1,220 @@
+*&---------------------------------------------------------------------*
+*& Include          ZRE_CONTRACT_CONV_TOP
+*&---------------------------------------------------------------------*
+TABLES: sscrfields.
+
+TYPE-POOLS: slis, icon.
+DATA: lt_fieldcat TYPE slis_t_fieldcat_alv.
+
+TYPES: BEGIN OF t_tdwkey,
+         perid TYPE prdni,  "SSN No
+         data  TYPE string,
+       END OF t_tdwkey.
+
+TYPES: BEGIN OF t_map_table,
+         counter    TYPE sy-tabix,
+         bapi_field TYPE char100,
+         data_field TYPE char100,
+         data_value TYPE char100,
+       END OF t_map_table.
+
+TYPES: BEGIN OF t_flags,
+         action TYPE string,
+       END OF t_flags.
+
+TYPES: BEGIN OF  t_main_stru,
+         pa0000      TYPE pa0000,
+         pa0001      TYPE pa0001,
+         pa0002      TYPE pa0002,
+         pa0006_1    TYPE pa0006,
+         pa0006_2    TYPE pa0006,
+         pa0105_0001 TYPE pa0105, "System user name (SY-UNAME)
+         pa0105_0010 TYPE pa0105, "E-mail
+         pa0105_9000 TYPE pa0105, "CAC ID Reference
+         pa0105_9001 TYPE pa0105,  "AU ID Reference
+         pa0105_9002 TYPE pa0105, "SSN or Other Personal ID
+         ls_flags    TYPE t_flags,
+       END OF t_main_stru.
+
+TYPES: BEGIN OF t_file_stru,
+         column_nm1 TYPE string,
+         column_name TYPE string,
+         table_name  TYPE string,
+         field_name  TYPE string,
+         alv_field   TYPE string,
+         data_type   TYPE c,
+       END OF t_file_stru.
+
+
+TYPES: BEGIN OF t_fm_input,
+         pernr  TYPE bdc_fval, "PERNR_D
+         perid  TYPE bdc_fval, "SSN #
+         begda  TYPE bdc_fval, "Start date P0000-BEGDA  PA0000
+         massg  TYPE bdc_fval,  "CHAR 2 0 Reason for Action  PA0000
+         stat2  TYPE bdc_fval,  "CHAR 1 0 Employment Status  PA0000
+         plans  TYPE bdc_fval, "Position  PA0001
+         STELL  type bdc_fval,  "job key
+         btrtl  TYPE bdc_fval, "Org key
+         ansvh  TYPE bdc_fval,   "Work Contract PA0001
+         nachn  TYPE bdc_fval, "Last Name
+         vorna  TYPE bdc_fval, "First Name
+         gbdat  TYPE bdc_fval,   "Date of Birth
+
+         anssa  TYPE bdc_fval,   "CHAR  4 0 Address Record Type  P0006
+         stras  TYPE bdc_fval, "CHAR 60  0 Street and House Number  P0006
+         ort01  TYPE bdc_fval, "CHAR 40  0 City  P0006
+         state  TYPE bdc_fval,   "CHAR  3 0 Region (State, Province, County) P0006
+         pstlz  TYPE bdc_fval,  "CHAR 10  0 Postal Code  P0006
+         land1  TYPE bdc_fval,   "CHAR  3 0 Country Key  P0006
+
+         stras2 TYPE bdc_fval, "CHAR 60  0 Street and House Number  P0006
+         ort012 TYPE bdc_fval, "CHAR 40  0 City  P0006
+         state2 TYPE bdc_fval,   "CHAR  3 0 Region (State, Province, County) P0006
+         pstlz2 TYPE bdc_fval,  "CHAR 10  0 Postal Code  P0006
+         land12 TYPE bdc_fval,   "CHAR  3 0 Country Key  P0006
+
+         uname  TYPE bdc_fval,  "CHAR 30  System user name (SY-UNAME)  PA0105
+         email  TYPE bdc_fval,
+         cacid  TYPE bdc_fval,
+         auid   TYPE bdc_fval,
+       END OF t_fm_input.
+
+TYPES: BEGIN OF t_alv_output,
+         light(4)      TYPE c, "1 Red, 2 Yellow, 3 Green
+         color_line(4) TYPE c,
+         chk(1),
+         color(4),
+         tcolor        TYPE slis_t_specialcol_alv,    "cell
+         celltab       TYPE lvc_t_styl,
+         pernr         TYPE prdni, "PERNR_D,
+         perid         TYPE prdni, "SSN #
+         begda         TYPE begda, "Start date P0000-BEGDA  PA0000
+         massg         TYPE massg,  "CHAR 2 0 Reason for Action  PA0000
+         stat2         TYPE stat2,  "CHAR 1 0 Employment Status  PA0000
+         plans         TYPE plans, "Position  PA0001
+         short         type short_d, "Position Object Abbreviation HRP1000-SHORT
+         ansvh         TYPE ansvh,   "Work Contract PA0001
+         nachn         TYPE pad_nachn, "Last Name PA0002
+         vorna         TYPE pad_vorna, "First Name PA0002
+         gbdat         TYPE gbdat,   "Date of Birth  PA0002
+
+         anssa         TYPE anssa,   "CHAR  4 0 Address Record Type  P0006
+         stras         TYPE pad_stras, "CHAR 60  0 Street and House Number  P0006
+         ort01         TYPE pad_ort01, "CHAR 40  0 City  P0006
+         state         TYPE regio,   "CHAR  3 0 Region (State, Province, County) P0006
+         pstlz         TYPE pstlz_hr,  "CHAR 10  0 Postal Code  P0006
+         land1         TYPE land1,   "CHAR  3 0 Country Key  P0006
+
+         stras2        TYPE pad_stras, "CHAR 60  0 Street and House Number  P0006
+         ort012        TYPE pad_ort01, "CHAR 40  0 City  P0006
+         state2        TYPE regio,   "CHAR  3 0 Region (State, Province, County) P0006
+         pstlz2        TYPE pstlz_hr,  "CHAR 10  0 Postal Code  P0006
+         land12        TYPE land1,   "CHAR  3 0 Country Key  P0006
+
+         uname         TYPE sysid,  "CHAR 30  System user name (SY-UNAME)  PA0105
+         email         TYPE comm_id_long, "sysid,
+         cacid         TYPE sysid,
+         auid          TYPE sysid,
+         action        TYPE string,  " Add/Assign
+         type          TYPE bapi_mtype,
+         id            TYPE symsgid,
+         number        TYPE symsgno,
+         message       TYPE bapi_msg,
+         intf_nfnd     TYPE c,
+       END OF t_alv_output.
+
+
+TYPES: tt_map_table TYPE TABLE OF t_map_table.
+TYPES: tt_alv_output TYPE TABLE OF t_alv_output.
+TYPES: tt_fm_input TYPE TABLE OF t_fm_input.
+TYPES: tt_tdwkey TYPE TABLE OF t_tdwkey.
+
+
+DATA: gt_file_stru TYPE TABLE OF t_file_stru.
+
+gt_file_stru = VALUE #(
+* ( COLUMN_NM1 = '' COLUMN_NAME = 'PERNR' TABLE_NAME = 'PA0002'  FIELD_NAME = 'PERNR'  ALV_FIELD = 'PERNR' data_type = 'C' )
+  ( COLUMN_NM1 = 'SSN OF PERSON' column_name = 'SSN' table_name = 'PA0002'  field_name = 'PERID'  alv_field = 'PERID' data_type = 'C'  )
+  ( COLUMN_NM1 = 'START DATE' column_name = 'EFFECTIVE_DATE' table_name = 'PA0000' field_name = 'BEGDA' alv_field = 'BEGDA' data_type = 'D'  )
+  ( COLUMN_NM1 = 'REASON' column_name = 'REASON' table_name = 'PA0000' field_name = 'MASSG' alv_field = 'MASSG' data_type = 'C'  )
+  ( COLUMN_NM1 = 'POSITION ID' column_name = 'POSITION_ID' table_name = 'PA0001' field_name = 'PLANS' alv_field = 'PLANS' data_type = 'C' )
+  ( COLUMN_NM1 = 'POSITION' column_name = 'POSITION_SHORT' table_name = 'HRP1000' field_name = 'SHORT' alv_field = 'SHORT' data_type = 'C' )
+  ( COLUMN_NM1 = '' column_name = 'SERVICE_RANK_PAYGRADE' table_name = 'PA0001' field_name = 'ANSVH' alv_field = 'ANSVH' data_type = 'C'  )
+  ( COLUMN_NM1 = 'LAST NAME' column_name = 'LAST_NAME' table_name = 'PA0002' field_name = 'NACHN' alv_field = 'NACHN' data_type = 'C'  )
+  ( COLUMN_NM1 = 'FIRST NAME' column_name = 'FIRST_NAME' table_name = 'PA0002' field_name = 'VORNA' alv_field = 'VORNA' data_type = 'C'  )
+  ( COLUMN_NM1 = 'DOB' column_name = 'DATE_OF_BIRTH' table_name = 'PA0002' field_name = 'GBDAT' alv_field = 'GBDAT' data_type = 'D'  )
+
+  ( COLUMN_NM1 = 'HOME ADDRESS NUMBER AND STREET' column_name = 'STREET_AND_HOUSE_NO' table_name = 'PA0006_1' field_name = 'STRAS' alv_field = 'STRAS' data_type = 'C'  )
+  ( COLUMN_NM1 = 'HOME ADDRESS CITY' column_name = 'CITY' table_name = 'PA0006_1' field_name = 'ORT01' alv_field = 'ORT01' data_type = 'C' )
+  ( COLUMN_NM1 = 'HOME ADDRESS STATE' column_name = 'STATE' table_name = 'PA0006_1' field_name = 'STATE' alv_field = 'STATE' data_type = 'C'  )
+  ( COLUMN_NM1 = 'HOME ADDRESS ZIP CODE' column_name = 'POSTAL_CODE' table_name = 'PA0006_1' field_name = 'PSTLZ' alv_field = 'PSTLZ' data_type = 'C' )
+  ( COLUMN_NM1 = '' column_name = 'COUNTRY' table_name = 'PA0006_1' field_name = 'LAND1' alv_field = 'LAND1' data_type = 'C'  )
+
+  ( COLUMN_NM1 = 'DUTY STATION NUMBER AND STREET' column_name = 'STREET_AND_HOUSE_NO2' table_name = 'PA0006_2' field_name = 'STRAS' alv_field = 'STRAS2' data_type = 'C'  )
+  ( COLUMN_NM1 = 'DUTY STATION  CITY' column_name = 'CITY2' table_name = 'PA0006_2' field_name = 'ORT01' alv_field = 'ORT012' data_type = 'C'  )
+  ( COLUMN_NM1 = 'DUTY STATION  STATE' column_name = 'STATE2' table_name = 'PA0006_2' field_name = 'STATE' alv_field = 'STATE2' data_type = 'C' )
+  ( COLUMN_NM1 = 'DUTY STATION  ZIP CODE' column_name = 'POSTAL_CODE2' table_name = 'PA0006_2' field_name = 'PSTLZ' alv_field = 'PSTLZ2'  data_type = 'C' )
+  ( COLUMN_NM1 = '' column_name = 'COUNTRY2' table_name = 'PA0006_2' field_name = 'LAND1' alv_field = 'LAND12' data_type = 'C'  )
+
+
+* ( COLUMN_NM1 = '' COLUMN_NAME = 'USER ID' TABLE_NAME = 'PA0105_0001' FIELD_NAME = 'USRID' ALV_FIELD = 'UNAME' data_type = 'C'  )
+  ( COLUMN_NM1 = 'EMAIL ADDRESS' column_name = 'EMAIL' table_name = 'PA0105_0010' field_name = 'USRID' alv_field = 'EMAIL' data_type = 'C'  )
+  ( COLUMN_NM1 = 'CAC ID / DOD ID / EIDP ID' column_name = 'CAC_ID' table_name = 'PA0105_9000' field_name = 'USRID' alv_field = 'CACID' data_type = 'C'  )
+  ( COLUMN_NM1 = 'AU ID' column_name = 'AUID' table_name = 'PA0105_9001' field_name = 'USRID' alv_field = 'AUID' data_type = 'C'  )
+  ( COLUMN_NM1 = '' column_name = 'ACTION' table_name = 'LS_FLAGS' field_name = 'ACTION' alv_field = 'ACTION' data_type = 'C' )
+*  ( COLUMN_NM1 = '' COLUMN_NAME = 'FACULTY LEVEL' TABLE_NAME = 'LS_FLAGS' FIELD_NAME = 'ACTION'  ALV_FIELD = 'ACTION' data_type = 'C' )
+*  ( COLUMN_NM1 = '' COLUMN_NAME = 'JOB TYPE' TABLE_NAME = 'LS_FLAGS' FIELD_NAME = 'ACTION' ALV_FIELD = 'ACTION' data_type = 'C'  )
+*  ( COLUMN_NM1 = '' COLUMN_NAME = 'PERSON TYPE' TABLE_NAME = 'LS_FLAGS' FIELD_NAME = 'ACTION' ALV_FIELD = 'ACTION' data_type = 'C'  )
+*  ( COLUMN_NM1 = '' COLUMN_NAME = 'SCHOOL' TABLE_NAME = 'LS_FLAGS' FIELD_NAME = 'ACTION' ALV_FIELD = 'ACTION'  data_type = 'C' )
+    ).
+
+*SSN OF PERSON
+*CAC ID / DOD ID / EIDP ID
+*AU ID
+*LAST NAME
+*FIRST NAME
+*DOB
+*EMAIL ADDRESS
+*START DATE
+*POSITION
+*HOME ADDRESS NUMBER AND STREET
+*HOME ADDRESS CITY
+*HOME ADDRESS STATE
+*HOME ADDRESS ZIP CODE
+*DUTY STATION NUMBER AND STREET
+*DUTY STATION  CITY
+*DUTY STATION  STATE
+*DUTY STATION  ZIP CODE
+
+*GENDER
+*COLLEGE
+*SCHOOL
+*MAIN TYPE OF PERSON
+*SECONDARY TYPE OF PERSON
+
+
+
+DATA: gt_main_data TYPE TABLE OF t_main_stru.
+DATA: gt_intf_data TYPE TABLE OF t_main_stru.
+DATA: gs_intf_data TYPE t_main_stru.
+DATA: gt_db_data TYPE TABLE OF t_main_stru.
+
+DATA: gs_db_data TYPE t_main_stru.
+
+DATA: lt_map_table TYPE tt_map_table.
+DATA: gt_alv_table TYPE tt_alv_output.
+DATA: gt_fm_input TYPE tt_fm_input.
+DATA  gt_tdwkey TYPE tt_tdwkey.
+DATA: gs_header_record TYPE string.
+
+
+
+DATA: g_grid TYPE REF TO cl_gui_alv_grid.
+DATA: gt_bad_cells TYPE lvc_t_modi.
+*data: gt_fieldcat type lvc_t_fcat.
+DATA: g_row_id TYPE lvc_s_roid-row_id.
+FIELD-SYMBOLS: <gs_outtab> TYPE any.
+
+DATA: g_edit TYPE c .
+DATA: g_manual_input TYPE c .
+g_manual_input  = abap_false.
